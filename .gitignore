@@ -11,3 +11,7 @@ wheels/
 .env
 data/
 .ipynb_checkpoints/
+.env.*
+!.env.example
+.claude/settings.local.json
+.agent-logs/
