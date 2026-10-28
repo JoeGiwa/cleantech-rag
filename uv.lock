@@ -558,6 +558,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
     { name = "requests" },
+    { name = "tiktoken" },
 ]
 
 [package.optional-dependencies]
@@ -591,6 +592,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.34.2" },
     { name = "rouge-score", marker = "extra == 'eval'", specifier = ">=0.1.2" },
     { name = "sentence-transformers", marker = "extra == 'eval'", specifier = ">=3.0" },
+    { name = "tiktoken", specifier = ">=0.14.0" },
 ]
 provides-extras = ["eval"]
 
