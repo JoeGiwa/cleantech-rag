@@ -2,6 +2,7 @@ import re
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 from pydantic import SecretStr
 from typer.testing import CliRunner
 
@@ -454,3 +455,180 @@ def test_evaluate_full_run_requires_confirmation(tmp_path, monkeypatch):
     )
     assert res.exit_code == 0, res.output
     assert len(asked) == 5
+
+
+def _eval_invoke(tmp_path, *args):
+    return runner.invoke(cli.app, ["evaluate", "--output-dir", str(tmp_path / "out"), *args])
+
+
+def test_evaluate_full_run_refused_without_flag_default_flags(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    res = _eval_invoke(tmp_path, "--max-queries", "0")
+    assert res.exit_code == 2
+    assert "--yes-full-eval" in res.output
+    assert asked == [] and not (tmp_path / "out").exists()
+
+
+def test_evaluate_yes_full_eval_alone_runs_everything(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    res = _eval_invoke(tmp_path, "--no-judge", "--yes-full-eval")
+    assert res.exit_code == 0, res.output
+    assert len(asked) == 5
+
+
+def test_evaluate_max_queries_with_yes_full_eval_still_limits(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    res = _eval_invoke(tmp_path, "--no-judge", "--max-queries", "2", "--yes-full-eval")
+    assert res.exit_code == 0, res.output
+    assert len(asked) == 2
+
+
+def test_evaluate_max_queries_above_dataset_size(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch, n=2)
+    res = _eval_invoke(tmp_path, "--no-judge", "--max-queries", "10")
+    assert res.exit_code == 0, res.output
+    assert len(asked) == 2
+
+
+def test_evaluate_negative_max_queries_rejected(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    res = _eval_invoke(tmp_path, "--max-queries", "-1")
+    assert res.exit_code != 0 and asked == []
+
+
+def test_evaluate_invalid_dataset_rejected(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    res = _eval_invoke(tmp_path, "--dataset", "bogus", "--no-judge")
+    assert res.exit_code != 0 and asked == []
+
+
+def test_evaluate_missing_eval_file_fails(tmp_path, monkeypatch):
+    _eval_setup(tmp_path, monkeypatch)
+    (tmp_path / cli.COMPLEX_QA_FILE).unlink()
+    res = _eval_invoke(tmp_path, "--no-judge")
+    assert res.exit_code == 1
+    assert "Eval file not found" in res.output
+
+
+def test_evaluate_summary_json_content_no_judge(tmp_path, monkeypatch):
+    import json
+
+    _eval_setup(tmp_path, monkeypatch)
+    res = _eval_invoke(tmp_path, "--no-judge")
+    assert res.exit_code == 0, res.output
+    data = json.loads(next((tmp_path / "out").glob("summary_*.json")).read_text())
+    assert data["judge"] is None
+    cfg = data["config"]
+    assert cfg["dataset"] == "complex" and cfg["judge_enabled"] is False
+    assert cfg["judge_model"] is None and cfg["max_queries"] == 3
+    assert cfg["n_queries_requested"] == 3
+    assert data["counts"]["n_queries"] == 3 and data["counts"]["n_errors"] == 0
+    # gold id for Question i is "i"; fake agent always returns ["1"], so only Q1 hits
+    assert data["retrieval"]["all_queries"]["n"] == 3
+    assert data["retrieval"]["all_queries"]["mrr"] == pytest.approx(1 / 3)
+
+
+def test_evaluate_full_run_config_max_queries_null(tmp_path, monkeypatch):
+    import json
+
+    _eval_setup(tmp_path, monkeypatch)
+    res = _eval_invoke(tmp_path, "--no-judge", "--yes-full-eval")
+    data = json.loads(next((tmp_path / "out").glob("summary_*.json")).read_text())
+    assert res.exit_code == 0 and data["config"]["max_queries"] is None
+
+
+def test_evaluate_with_judge_and_judge_model_override(tmp_path, monkeypatch):
+    import json
+
+    from cleantech_rag.evaluation.judge import CRITERIA, JudgeResult
+
+    _eval_setup(tmp_path, monkeypatch)
+    made = {}
+
+    class FakeJudge:
+        def __init__(self, settings=None, **kw):
+            made["model"] = settings.judge_model
+
+        def evaluate(self, q, p, r):
+            return JudgeResult(scores=dict.fromkeys(CRITERIA, 5), overall=5.0)
+
+    monkeypatch.setattr("cleantech_rag.evaluation.judge.LLMJudge", FakeJudge)
+    res = _eval_invoke(tmp_path, "--judge-model", "my-judge")
+    assert res.exit_code == 0, res.output
+    assert made["model"] == "my-judge"
+    data = json.loads(next((tmp_path / "out").glob("summary_*.json")).read_text())
+    assert data["config"]["judge_model"] == "my-judge" and data["config"]["judge_enabled"]
+    assert data["judge"]["n_scored"] == 3 and data["judge"]["overall"] == 5.0
+
+
+def test_evaluate_no_judge_never_constructs_judge(tmp_path, monkeypatch):
+    _eval_setup(tmp_path, monkeypatch)
+
+    def boom(*a, **k):
+        raise AssertionError("judge constructed")
+
+    monkeypatch.setattr("cleantech_rag.evaluation.judge.LLMJudge", boom)
+    assert _eval_invoke(tmp_path, "--no-judge").exit_code == 0
+
+
+def test_evaluate_agent_errors_reported_not_fatal(tmp_path, monkeypatch):
+    import json
+
+    _eval_setup(tmp_path, monkeypatch)
+
+    class Boom:
+        def run(self, q, thread_id=None):
+            raise RuntimeError("down")
+
+    monkeypatch.setattr(cli, "_setup_agent", lambda settings: Boom())
+    res = _eval_invoke(tmp_path, "--no-judge")
+    assert res.exit_code == 0, res.output
+    assert "0 evaluated, 3 errors" in res.output
+    data = json.loads(next((tmp_path / "out").glob("summary_*.json")).read_text())
+    assert data["counts"]["n_errors"] == 3 and data["retrieval"]["all_queries"]["mrr"] is None
+
+
+def test_evaluate_simple_dataset(tmp_path, monkeypatch):
+    import json
+
+    asked = _eval_setup(tmp_path, monkeypatch)
+    _corpus(tmp_path, n=3)
+    pd.DataFrame(
+        {
+            "example_id": ["e1", "e2"],
+            "question_id": ["1", "2"],
+            "question": ["Simple one?", "Simple two?"],
+            "relevant_text": ["t", "t"],
+            "answer": ["a1", "a2"],
+            "article_url": ["http://x/1", "http://nowhere/z"],
+        }
+    ).to_csv(tmp_path / cli.SIMPLE_QA_FILE, sep=";", index=False)
+    res = _eval_invoke(tmp_path, "--dataset", "simple", "--no-judge")
+    assert res.exit_code == 0, res.output
+    assert asked == ["Simple one?", "Simple two?"]
+    data = json.loads(next((tmp_path / "out").glob("summary_*.json")).read_text())
+    assert data["config"]["dataset"] == "simple"
+    assert data["counts"]["n_no_gold"] == 1  # unmapped URL
+    assert data["retrieval"]["all_queries"]["n"] == 1
+    assert data["retrieval"]["all_queries"]["mrr"] == 1.0
+
+
+def test_evaluate_simple_missing_corpus_fails(tmp_path, monkeypatch):
+    _eval_setup(tmp_path, monkeypatch)
+    res = _eval_invoke(tmp_path, "--dataset", "simple", "--no-judge")
+    assert res.exit_code == 1 and "Eval file not found" in res.output
+
+
+def test_evaluate_help_lists_flags():
+    res, out = _help(["evaluate", "--help"])
+    assert res.exit_code == 0
+    for flag in (
+        "--dataset",
+        "--max-queries",
+        "--no-judge",
+        "--judge-model",
+        "--yes-full-eval",
+        "--output-dir",
+    ):
+        assert flag in out
+    assert "complex" in out and "simple" in out

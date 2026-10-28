@@ -150,3 +150,143 @@ def test_query_without_gold_ids_left_out_of_retrieval():
     assert s["counts"]["n_no_gold"] == 1
     assert s["retrieval"]["all_queries"]["n"] == 0
     assert s["retrieval"]["all_queries"]["mrr"] is None
+
+
+# ------------------------------------------------------------ extra edge cases
+
+
+def _recs(items, plan, judge=None):
+    return evaluate_items(items, FakeAgent(plan), judge, encoder=fake_encoder)
+
+
+def test_all_queries_errored_gives_empty_averages():
+    items = [EvalItem("q0", "r", ["a"]), EvalItem("q1", "r", ["b"])]
+    plan = {"q0": ValueError("x"), "q1": RuntimeError("y")}
+    s = summarize(_recs(items, plan, FakeJudge()), {}, judge_enabled=True)
+    assert s["counts"]["n_errors"] == 2 and s["counts"]["n_evaluated"] == 0
+    assert s["retrieval"]["all_queries"]["n"] == 0
+    assert s["retrieval"]["all_queries"]["mrr"] is None
+    assert all(v is None for v in s["response"].values())
+    assert s["judge"]["n_scored"] == 0 and s["judge"]["overall"] is None
+    json.dumps(s)  # serialisable
+
+
+def test_zero_retrieval_only_queries():
+    items = [EvalItem("q0", "r", ["a"]), EvalItem("q1", "r", ["b"])]
+    plan = {"q0": ([], []), "q1": ([], [{"tool": "web_search", "ok": True}])}
+    s = summarize(_recs(items, plan), {}, judge_enabled=False)
+    assert s["retrieval"]["retrieval_only"]["n"] == 0
+    assert s["retrieval"]["retrieval_only"]["precision_at_k"] is None
+    assert s["retrieval"]["all_queries"]["n"] == 2
+    assert s["retrieval"]["all_queries"]["recall_at_k"] == 0.0
+    assert s["counts"]["n_retrieval_used"] == 0
+
+
+def test_empty_items():
+    recs = evaluate_items([], FakeAgent({}), None, encoder=fake_encoder)
+    assert recs == []
+    s = summarize(recs, {}, judge_enabled=False)
+    assert s["counts"]["n_queries"] == 0
+    assert s["retrieval"]["all_queries"]["n"] == 0
+
+
+def test_retrieve_ok_with_no_hits_counts_as_retrieval_used():
+    items = [EvalItem("q0", "r", ["a"])]
+    recs = _recs(items, {"q0": ([], RET)})
+    assert recs[0].retrieval_used is True
+    s = summarize(recs, {}, judge_enabled=False)
+    assert s["retrieval"]["retrieval_only"]["n"] == 1
+    assert s["retrieval"]["retrieval_only"]["recall_at_k"] == 0.0
+
+
+def test_failed_retrieve_tool_not_counted_as_used():
+    recs = _recs([EvalItem("q0", "r", ["a"])], {"q0": ([], [{"tool": "retrieve", "ok": False}])})
+    assert recs[0].retrieval_used is False
+
+
+def test_ids_coerced_to_str_and_missing_attrs_tolerated():
+    class Agent:
+        def run(self, question, thread_id=None):
+            return SimpleNamespace(answer="a", retrieved_ids=[1, 2])
+
+    recs = evaluate_items([EvalItem("q", "r", ["1"])], Agent(), None, encoder=fake_encoder)
+    assert recs[0].retrieved_ids == ["1", "2"]
+    assert recs[0].retrieval["mrr"] == 1.0
+
+
+def test_none_retrieved_ids_is_empty():
+    class Agent:
+        def run(self, question, thread_id=None):
+            return SimpleNamespace(answer="a", retrieved_ids=None, tools_used=None)
+
+    recs = evaluate_items([EvalItem("q", "r", ["1"])], Agent(), None, encoder=fake_encoder)
+    assert recs[0].retrieved_ids == [] and recs[0].retrieval_used is False
+
+
+def test_error_after_success_does_not_leak_ids():
+    items = [EvalItem("q0", "r", ["a"]), EvalItem("q1", "r", ["a"])]
+    recs = _recs(items, {"q0": (["a"], RET), "q1": RuntimeError("x")})
+    assert recs[1].retrieved_ids == [] and recs[1].retrieval is None
+    assert recs[1].error.startswith("RuntimeError")
+
+
+def test_agent_called_once_per_query_in_order():
+    agent, _ = run()
+    assert agent.calls == ["q0", "q1", "q2", "q3"]
+
+
+def test_judge_not_called_for_errored_query():
+    seen = []
+
+    class J(FakeJudge):
+        def evaluate(self, query, prediction, reference):
+            seen.append(query)
+            return super().evaluate(query, prediction, reference)
+
+    run(J())
+    assert "q2" not in seen and len(seen) == 3
+
+
+def test_fatal_judge_error_propagates():
+    class J:
+        def evaluate(self, *a):
+            raise PermissionError("bad key")
+
+    with pytest.raises(PermissionError):
+        run(J())
+
+
+def test_judge_failure_keeps_retrieval_metrics_in_aggregates():
+    _, recs = run(FakeJudge(fail_on={"q0", "q1", "q3"}))
+    s = summarize(recs, {}, judge_enabled=True)
+    assert s["judge"]["n_scored"] == 0 and s["judge"]["overall"] is None
+    assert s["retrieval"]["all_queries"]["n"] == 3
+    assert s["counts"]["n_evaluated"] == 3
+
+
+def test_csv_contents(tmp_path):
+    _, recs = run(FakeJudge(fail_on={"q3"}))
+    s = summarize(recs, {}, judge_enabled=True)
+    _, cp = write_outputs(recs, s, tmp_path, datetime(2026, 1, 1))
+    rows = list(csv.DictReader(cp.open()))
+    assert rows[0]["retrieved_ids"] == "a;z" and rows[0]["gold_ids"] == "a"
+    assert rows[0]["n_retrieved"] == "2" and rows[0]["judge_overall"] == "4.0"
+    assert rows[1]["retrieved_ids"] == "" and rows[1]["retrieval_used"] == "False"
+    assert rows[2]["error"].startswith("RuntimeError") and rows[2]["mrr"] == ""
+    assert rows[3]["judge_error"].startswith("ValidationError")
+    assert [r["index"] for r in rows] == ["0", "1", "2", "3"]
+
+
+def test_write_outputs_no_judge_leaves_judge_columns_blank(tmp_path):
+    _, recs = run()
+    s = summarize(recs, {}, judge_enabled=False)
+    jp, cp = write_outputs(recs, s, tmp_path, datetime(2026, 1, 1))
+    assert json.loads(jp.read_text())["judge"] is None
+    assert all(r["judge_overall"] == "" for r in csv.DictReader(cp.open()))
+
+
+def test_question_with_delimiters_roundtrips_in_csv(tmp_path):
+    items = [EvalItem('a, "b"\nc; d', "r", ["a"])]
+    recs = _recs(items, {items[0].question: (["a"], RET)})
+    _, cp = write_outputs(recs, summarize(recs, {}, False), tmp_path, datetime(2026, 1, 1))
+    assert list(csv.DictReader(cp.open()))[0]["question"] == items[0].question
