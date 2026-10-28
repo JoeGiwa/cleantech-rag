@@ -2,11 +2,13 @@
 
 Graph: START -> agent -> (tool calls? -> tools -> agent | else END). State is per invocation:
 ``retrieved_ids`` starts empty on every ``run`` and is filled only from this run's tool
-artifacts, so IDs cannot leak between queries.
+artifacts, so IDs cannot leak between queries. ``messages`` persist per ``thread_id`` through an
+``InMemorySaver`` checkpointer (conversation memory); ``retrieved_ids`` is overwritten each run.
 """
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal
 
@@ -21,6 +23,7 @@ from langgraph.prebuilt import ToolNode
 from typing_extensions import TypedDict
 
 from cleantech_rag.config import Settings, get_settings
+from cleantech_rag.memory import make_checkpointer, messages_to_trim, summarize
 from cleantech_rag.tools.reasoning import make_reasoning_tool, message_text
 from cleantech_rag.tools.retriever import make_retriever_tool
 from cleantech_rag.tools.web_search import make_web_search_tool
@@ -76,14 +79,24 @@ def build_graph(
     llm: BaseChatModel,
     tools: list[BaseTool],
     k: int = 5,
+    max_history: int = 10,
+    checkpointer: Any = None,
 ):
-    """Compile the agent/tools loop. ``llm`` must support ``bind_tools``."""
+    """Compile the agent/tools loop. ``llm`` must support ``bind_tools``.
+
+    Conversation history is kept per ``thread_id`` by ``checkpointer`` (default: in-memory) and
+    trimmed to the last ``max_history`` turns.
+    """
     llm_with_tools = llm.bind_tools(tools)
     tool_node = ToolNode(tools, handle_tool_errors=True)
 
     def agent_node(state: AgentState) -> dict[str, Any]:
-        reply = llm_with_tools.invoke([SystemMessage(content=SYSTEM_PROMPT), *state["messages"]])
-        return {"messages": [reply]}
+        # Trim old turns here (not in a separate node) so it costs no extra graph step.
+        drop = messages_to_trim(state["messages"], max_history)
+        dropped = {r.id for r in drop}
+        kept = [m for m in state["messages"] if m.id not in dropped]
+        reply = llm_with_tools.invoke([SystemMessage(content=SYSTEM_PROMPT), *kept])
+        return {"messages": [*drop, reply]}
 
     def tools_node(state: AgentState) -> dict[str, Any]:
         out = tool_node.invoke(state)
@@ -106,22 +119,31 @@ def build_graph(
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", route, {"tools": "tools", END: END})
     graph.add_edge("tools", "agent")
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer or make_checkpointer())
 
 
 class Agent:
-    def __init__(self, graph: Any, recursion_limit: int = 12):
+    def __init__(self, graph: Any, recursion_limit: int = 12, llm: BaseChatModel | None = None):
         self._graph = graph
         self.recursion_limit = recursion_limit
+        self._llm = llm
 
-    def run(self, question: str) -> AgentResult:
-        """Answer one question; on hitting the step limit return a fallback with partial state."""
+    def run(self, question: str, thread_id: str | None = None) -> AgentResult:
+        """Answer one question; on hitting the step limit return a fallback with partial state.
+
+        Turns sharing a ``thread_id`` see each other's history. Without one the run uses a fresh
+        throwaway thread, so it is stateless (what evaluation needs).
+        """
+        thread_id = thread_id or f"ephemeral-{uuid.uuid4()}"
         state: dict[str, Any] = {"messages": [], "retrieved_ids": []}
         stopped: Literal["completed", "step_limit"] = "completed"
         try:
             for chunk in self._graph.stream(
                 {"messages": [HumanMessage(content=question)], "retrieved_ids": []},
-                config={"recursion_limit": self.recursion_limit},
+                config={
+                    "recursion_limit": self.recursion_limit,
+                    "configurable": {"thread_id": thread_id},
+                },
                 stream_mode="values",
             ):
                 state = chunk  # keep the latest full state
@@ -142,6 +164,21 @@ class Agent:
             answer = message_text(messages[-1].content) if messages else ""
         return AgentResult(answer, list(state["retrieved_ids"]), tools_used, stopped)
 
+    def history(self, thread_id: str) -> list[BaseMessage]:
+        """Live messages of a thread (empty for an unknown thread)."""
+        config = {"configurable": {"thread_id": thread_id}}
+        return list(self._graph.get_state(config).values.get("messages", []))
+
+    def clear(self, thread_id: str) -> None:
+        """Forget a thread's history."""
+        self._graph.checkpointer.delete_thread(thread_id)
+
+    def summary(self, thread_id: str) -> str:
+        """LLM summary of the thread's current history."""
+        if self._llm is None:
+            raise RuntimeError("Agent was built without an llm; summary is unavailable.")
+        return summarize(self._llm, self.history(thread_id))
+
 
 def create_agent(
     store: VectorStore,
@@ -157,7 +194,9 @@ def create_agent(
         make_web_search_tool(settings),
         make_reasoning_tool(store, llm, k=k, overfetch=over),
     ]
-    graph = build_graph(llm, tools, k=k)
+    graph = build_graph(llm, tools, k=k, max_history=settings.max_history)
     return Agent(
-        graph, settings.agent_recursion_limit if recursion_limit is None else recursion_limit
+        graph,
+        settings.agent_recursion_limit if recursion_limit is None else recursion_limit,
+        llm,
     )
