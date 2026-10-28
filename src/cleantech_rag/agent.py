@@ -45,21 +45,56 @@ STRATEGY:
 
 Always prioritize accuracy and cite your sources when possible."""
 
+FIRST_TURN_NOTE = (
+    "\n\nThis is the first message of the conversation: there is no previous answer. If the "
+    "user asks what you said earlier or refers to a previous answer, reply that there is no "
+    "previous answer yet instead of retrieving or guessing."
+)
+
 
 @dataclass(frozen=True)
 class AgentResult:
     answer: str
     retrieved_ids: list[str] = field(default_factory=list)
-    # Executed tool calls in call order: [{"tool": name, "ok": bool}]. ok means the tool did not
-    # raise/error (web_search soft-failure strings, e.g. "No web results found.", count as ok).
+    # Executed tool calls in call order: [{"tool": name, "ok": bool}]. ok is False when the tool
+    # raised/errored or reported failure via artifact["ok"] (web_search: disabled, HTTP error,
+    # timeout). "No web results found." is not a failure.
     tools_used: list[dict[str, Any]] = field(default_factory=list)
     stopped_reason: Literal["completed", "step_limit"] = "completed"
+    # One {"id", "title", "url"} per retrieved article, same order as retrieved_ids; title/url
+    # come from this turn's retrieved documents ("" when unknown).
+    sources: list[dict[str, str]] = field(default_factory=list)
 
 
 STEP_LIMIT_ANSWER = (
     "I could not finish answering within the allowed number of reasoning steps. "
     "Please try rephrasing or narrowing the question."
 )
+
+
+def _reports_failure(msg: ToolMessage) -> bool:
+    return isinstance(msg.artifact, dict) and msg.artifact.get("ok") is False
+
+
+def _sources(messages: list[BaseMessage], ids: list[str]) -> list[dict[str, str]]:
+    """Title/URL for each retrieved id, from the documents in this turn's tool artifacts."""
+    meta: dict[str, dict[str, Any]] = {}
+    for m in messages:
+        if not isinstance(m, ToolMessage) or m.status == "error":
+            continue
+        docs = m.artifact.get("documents", []) if isinstance(m.artifact, dict) else []
+        for doc in docs:
+            md = getattr(doc, "metadata", None) or {}
+            if md.get("article_id") is not None:
+                meta.setdefault(str(md["article_id"]), md)
+    return [
+        {
+            "id": i,
+            "title": str(meta.get(i, {}).get("title") or ""),
+            "url": str(meta.get(i, {}).get("url") or ""),
+        }
+        for i in ids
+    ]
 
 
 class AgentState(TypedDict):
@@ -96,7 +131,9 @@ def build_graph(
         drop = messages_to_trim(state["messages"], max_history)
         dropped = {r.id for r in drop}
         kept = [m for m in state["messages"] if m.id not in dropped]
-        reply = llm_with_tools.invoke([SystemMessage(content=SYSTEM_PROMPT), *kept])
+        first_turn = sum(isinstance(m, HumanMessage) for m in kept) <= 1
+        system = SYSTEM_PROMPT + (FIRST_TURN_NOTE if first_turn else "")
+        reply = llm_with_tools.invoke([SystemMessage(content=system), *kept])
         return {"messages": [*drop, reply]}
 
     def tools_node(state: AgentState) -> dict[str, Any]:
@@ -168,7 +205,7 @@ class Agent:
         start = next((i for i, m in enumerate(all_messages) if m.id == turn_id), None)
         messages = [] if start is None else all_messages[start:]  # fail safe: never leak history
         tools_used = [
-            {"tool": m.name, "ok": m.status != "error"}
+            {"tool": m.name, "ok": m.status != "error" and not _reports_failure(m)}
             for m in messages
             if isinstance(m, ToolMessage)
         ]
@@ -176,7 +213,8 @@ class Agent:
             answer = STEP_LIMIT_ANSWER
         else:
             answer = message_text(messages[-1].content) if messages else ""
-        return AgentResult(answer, list(state["retrieved_ids"]), tools_used, stopped)
+        ids = list(state["retrieved_ids"])
+        return AgentResult(answer, ids, tools_used, stopped, _sources(messages, ids))
 
     def _saver(self) -> Any:
         saver = getattr(self._graph, "checkpointer", None)

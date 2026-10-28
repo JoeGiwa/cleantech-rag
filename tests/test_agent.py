@@ -65,7 +65,8 @@ def test_web_search_run_does_not_leak_previous_ids(fake_embeddings, fake_chat_mo
     assert agent.run("a").retrieved_ids != []
     res = agent.run("b")
     assert res.retrieved_ids == []
-    assert res.tools_used == [{"tool": "web_search", "ok": True}]
+    # no BRAVE_API_KEY in tests: the disabled tool is a failure, not ok
+    assert res.tools_used == [{"tool": "web_search", "ok": False}]
     assert res.answer == "second"
 
 
@@ -357,3 +358,80 @@ def test_recursion_limit_comes_from_settings(fake_embeddings, fake_chat_model_fa
         _store(fake_embeddings), llm, Settings(agent_recursion_limit=7, _env_file=None)
     )
     assert agent.recursion_limit == 7
+
+
+# ---- issue 30 cleanups ---------------------------------------------------------------------
+
+
+def test_parallel_tool_calls_at_step_limit_close_all_calls(fake_chat_model_factory):
+    tools = [_stub_tool("retrieve", ["1"]), _stub_tool("web_search", [], artifact=False)]
+    agent, llm = _stub_agent(
+        fake_chat_model_factory,
+        [_multi("retrieve", "web_search"), AIMessage(content="next turn ok")],
+        tools,
+        recursion_limit=1,  # the agent emits parallel calls, then the limit trips before tools
+    )
+    res = agent.run("q", thread_id="t")
+    assert res.stopped_reason == "step_limit" and res.answer == STEP_LIMIT_ANSWER
+    msgs = agent.history("t")
+    ai = next(m for m in msgs if isinstance(m, AIMessage) and m.tool_calls)
+    answered = {m.tool_call_id for m in msgs if isinstance(m, ToolMessage)}
+    assert answered == {c["id"] for c in ai.tool_calls}
+    assert isinstance(msgs[-1], AIMessage) and msgs[-1].content == STEP_LIMIT_ANSWER
+    agent.recursion_limit = 5
+    assert agent.run("again", thread_id="t").answer == "next turn ok"  # thread still valid
+
+
+def test_web_search_failure_marked_not_ok(fake_chat_model_factory):
+    def fn(query: str):
+        return "Web search failed: HTTP 500.", {"article_ids": [], "ok": False}
+
+    tool = StructuredTool.from_function(
+        fn, name="web_search", description="d", response_format="content_and_artifact"
+    )
+    agent, _ = _stub_agent(
+        fake_chat_model_factory, [_multi("web_search"), AIMessage(content="x")], [tool]
+    )
+    assert agent.run("q").tools_used == [{"tool": "web_search", "ok": False}]
+
+
+def test_result_sources_have_title_and_url(fake_embeddings, fake_chat_model_factory):
+    store = InMemoryVectorStore(fake_embeddings)
+    store.add_documents(
+        [
+            Document(
+                page_content="solar",
+                metadata={"article_id": "5", "title": "Sun", "url": "http://s/5"},
+            )
+        ]
+    )
+    llm = fake_chat_model_factory([_call("retrieve", "solar", "1"), AIMessage(content="a")])
+    agent = create_agent(store, llm, Settings(top_k=3, _env_file=None))
+    res = agent.run("q")
+    assert res.sources == [{"id": "5", "title": "Sun", "url": "http://s/5"}]
+
+
+def test_first_turn_note_only_without_history(fake_chat_model_factory):
+    agent, llm = _stub_agent(
+        fake_chat_model_factory, [AIMessage(content="a"), AIMessage(content="b")], []
+    )
+    agent.run("what did you say?", thread_id="t")
+    agent.run("and now?", thread_id="t")
+    first_system = llm.calls[0][0].content
+    second_system = llm.calls[1][0].content
+    assert "no previous answer" in first_system
+    assert "no previous answer" not in second_system
+
+
+def test_create_agent_wires_retrieval_overfetch(fake_chat_model_factory):
+    seen = []
+
+    class Store:
+        def similarity_search(self, query, k=4, **kw):
+            seen.append(k)
+            return []
+
+    llm = fake_chat_model_factory([_call("retrieve", "x", "1"), AIMessage(content="a")])
+    agent = create_agent(Store(), llm, Settings(top_k=3, retrieval_overfetch=7, _env_file=None))
+    agent.run("q")
+    assert seen == [21]
