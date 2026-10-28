@@ -16,10 +16,19 @@ cleantech-rag = "cleantech_rag:main"
 requires = ["uv_build>=0.13.6,<0.14.0"]
 build-backend = "uv_build"
 
+[project.optional-dependencies]
+eval = [
+    "nltk>=3.9",
+    "rouge-score>=0.1.2",
+    "sentence-transformers>=3.0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=9.2.0",
     "ruff>=0.17.3",
+    "nltk>=3.9",
+    "rouge-score>=0.1.2",
 ]
 
 [tool.ruff]
