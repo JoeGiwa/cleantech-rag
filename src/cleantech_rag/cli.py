@@ -370,6 +370,31 @@ def evaluate(
     typer.echo(f"Summary: {summary_path}\nPer-query CSV: {csv_path}")
 
 
+@app.command()
+def report(
+    summary: Annotated[Path, typer.Argument(help="Summary JSON written by `evaluate`.")],
+    output_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-dir", help="Where to write the charts and table (default: next to the JSON)."
+        ),
+    ] = None,
+    verbose: VerboseOpt = False,
+) -> None:
+    """Make a markdown table and PNG charts from an evaluation summary JSON (offline, free)."""
+    _apply_verbose(verbose)
+    if not summary.exists():
+        raise _fail(f"Summary file not found at {summary}.")
+    try:
+        from cleantech_rag.evaluation.report import generate_report
+
+        paths = generate_report(summary, output_dir or summary.parent)
+    except ImportError as exc:
+        raise _fail(f"{exc}. Install the extras: `uv sync --extra eval`.") from exc
+    for path in paths:
+        typer.echo(f"Wrote {path}")
+
+
 def main() -> None:
     app()
 
