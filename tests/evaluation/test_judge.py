@@ -1,5 +1,7 @@
 import socket
 
+import httpx
+import openai
 import pytest
 
 from cleantech_rag.evaluation import judge as j
@@ -21,6 +23,9 @@ class _FakeStructured:
 
     def invoke(self, prompt):
         self.owner.prompts.append(prompt)
+        self.owner.calls += 1
+        if self.owner.errors:
+            raise self.owner.errors.pop(0)
         if self.owner.exc:
             raise self.owner.exc
         if self.owner.payload is not None:
@@ -32,8 +37,10 @@ class _FakeStructured:
 class FakeModel:
     """Fake chat model: validate ``payload`` via the schema, return ``obj``, or raise ``exc``."""
 
-    def __init__(self, payload=None, obj=None, exc=None):
+    def __init__(self, payload=None, obj=None, exc=None, errors=()):
         self.payload, self.obj, self.exc = payload, obj, exc
+        self.errors = list(errors)  # raised one per call, then normal behaviour
+        self.calls = 0
         self.prompts, self.schemas = [], []
 
     def with_structured_output(self, schema):
@@ -185,3 +192,82 @@ def test_build_judge_model_uses_settings_model_name(monkeypatch):
     model = j.LLMJudge(settings=settings).model
     assert isinstance(model, FakeChat)
     assert captured["model"] == "my-judge"
+
+
+_REQ = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+
+
+def _status_error(cls, status):
+    return cls("err", response=httpx.Response(status, request=_REQ), body=None)
+
+
+def _rate_limit():
+    return _status_error(openai.RateLimitError, 429)
+
+
+def _timeout():
+    return openai.APITimeoutError(request=_REQ)
+
+
+def _retry_judge(model, **kw):
+    delays = []
+    judge = j.LLMJudge(model, base_delay=kw.pop("base_delay", 1.0), sleep=delays.append, **kw)
+    return judge, delays
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        _status_error(openai.AuthenticationError, 401),
+        _status_error(openai.PermissionDeniedError, 403),
+        _status_error(openai.NotFoundError, 404),
+    ],
+)
+def test_fatal_errors_reraise_without_retry(exc):
+    model = FakeModel(_reply(), errors=[exc])
+    judge, delays = _retry_judge(model)
+    with pytest.raises(type(exc)):
+        judge.evaluate("q", "p", "r")
+    assert model.calls == 1 and delays == []
+
+
+@pytest.mark.parametrize("make", [_rate_limit, _timeout, lambda: TimeoutError("slow")])
+def test_transient_error_then_success(make):
+    model = FakeModel(_reply(), errors=[make()])
+    judge, delays = _retry_judge(model)
+    r = judge.evaluate("q", "p", "r")
+    assert r.ok and r.overall == pytest.approx(4.0)
+    assert model.calls == 2 and delays == [1.0]
+
+
+def test_two_transient_errors_then_success_backoff():
+    model = FakeModel(_reply(), errors=[_rate_limit(), _timeout()])
+    judge, delays = _retry_judge(model, base_delay=0.5)
+    assert judge.evaluate("q", "p", "r").ok
+    assert model.calls == 3 and delays == [0.5, 1.0]
+
+
+@pytest.mark.parametrize("make", [_rate_limit, _timeout])
+def test_transient_error_on_all_attempts_gives_none(make):
+    model = FakeModel(_reply(), errors=[make(), make(), make()])
+    judge, delays = _retry_judge(model, base_delay=2.0)
+    r = judge.evaluate("q", "p", "r")
+    assert not r.ok and r.overall is None and r.error
+    assert all(v is None for v in r.scores.values())
+    assert model.calls == 3 and delays == [2.0, 4.0]
+
+
+def test_generic_error_not_retried():
+    model = FakeModel(_reply(), errors=[RuntimeError("boom")])
+    judge, delays = _retry_judge(model)
+    r = judge.evaluate("q", "p", "r")
+    assert not r.ok and "boom" in r.error
+    assert model.calls == 1 and delays == []
+
+
+def test_validation_error_not_retried():
+    model = FakeModel(_reply(accuracy=9))
+    judge, delays = _retry_judge(model)
+    r = judge.evaluate("q", "p", "r")
+    assert not r.ok and "accuracy" in r.error
+    assert model.calls == 1 and delays == []

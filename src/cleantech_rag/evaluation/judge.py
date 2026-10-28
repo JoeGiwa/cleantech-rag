@@ -5,15 +5,23 @@ so the scores come back already validated against a Pydantic schema. A judge fai
 error, schema validation error, unexpected return) is recorded as ``None`` plus an error message,
 never as 0, and aggregates exclude failures and report ``n_failed``.
 
+Two kinds of failure are treated differently. Auth and model-not-found errors (401, 403, 404)
+are configuration problems and are re-raised immediately: recording them per query would hide
+a broken run behind a column of Nones. Rate limits and timeouts are transient and are retried
+with exponential backoff (``base_delay * 2**attempt``) up to ``max_attempts`` tries; if the last
+try also fails the result is ``None`` plus an error. Every other failure is recorded without retry.
+
 The judge model is injected; ``build_judge_model`` creates the real one lazily.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+import openai
 from pydantic import BaseModel, Field, StrictInt, ValidationError
 
 from cleantech_rag.config import Settings, get_settings
@@ -21,6 +29,19 @@ from cleantech_rag.config import Settings, get_settings
 CRITERIA: tuple[str, ...] = ("relevance", "accuracy", "completeness", "clarity")
 MIN_SCORE = 1
 MAX_SCORE = 5
+
+# Configuration errors: never retried, never recorded as a per-query failure.
+FATAL_ERRORS: tuple[type[Exception], ...] = (
+    openai.AuthenticationError,
+    openai.PermissionDeniedError,
+    openai.NotFoundError,
+)
+# Transient errors: retried with exponential backoff.
+RETRYABLE_ERRORS: tuple[type[Exception], ...] = (
+    openai.RateLimitError,
+    openai.APITimeoutError,
+    TimeoutError,
+)
 
 JUDGE_PROMPT = """You are an expert evaluator for question-answering systems.
 
@@ -89,19 +110,42 @@ def _describe_error(exc: Exception) -> str:
 class LLMJudge:
     """Judge an answer with an injected chat model via structured output."""
 
-    def __init__(self, model: Any | None = None, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        model: Any | None = None,
+        settings: Settings | None = None,
+        max_attempts: int = 3,
+        base_delay: float = 1.0,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self.model = model if model is not None else build_judge_model(settings)
+        self.max_attempts = max_attempts
+        self.base_delay = base_delay
+        self.sleep = sleep
+
+    def _score(self, prompt: str) -> dict[str, int]:
+        structured = self.model.with_structured_output(JudgeScores)
+        response = structured.invoke(prompt)
+        if not isinstance(response, JudgeScores):
+            raise TypeError(f"unexpected judge response: {type(response).__name__}")
+        return {name: getattr(response, name) for name in CRITERIA}
 
     def evaluate(self, query: str, prediction: str, reference: str) -> JudgeResult:
         prompt = JUDGE_PROMPT.format(query=query, prediction=prediction, reference=reference)
-        try:
-            structured = self.model.with_structured_output(JudgeScores)
-            response = structured.invoke(prompt)
-            if not isinstance(response, JudgeScores):
-                raise TypeError(f"unexpected judge response: {type(response).__name__}")
-            scores = {name: getattr(response, name) for name in CRITERIA}
-        except Exception as exc:  # noqa: BLE001 - any failure must become an honest None result
-            return JudgeResult(error=_describe_error(exc))
+        for attempt in range(self.max_attempts):
+            try:
+                scores = self._score(prompt)
+                break
+            except FATAL_ERRORS:
+                raise
+            except RETRYABLE_ERRORS as exc:
+                if attempt + 1 >= self.max_attempts:
+                    return JudgeResult(error=_describe_error(exc))
+                self.sleep(self.base_delay * 2**attempt)
+            except Exception as exc:  # noqa: BLE001 - any other failure becomes an honest None
+                return JudgeResult(error=_describe_error(exc))
+        else:  # max_attempts < 1
+            return JudgeResult(error="judge not attempted: max_attempts < 1")
         overall = sum(scores.values()) / len(CRITERIA)
         return JudgeResult(scores=scores, overall=overall)
 
