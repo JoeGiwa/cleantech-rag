@@ -113,9 +113,19 @@ def test_results_truncated_to_count(monkeypatch):
     assert "[3]" in out and "[4]" not in out
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: non-dict JSON / null web / null results raise")
+_BUG = pytest.mark.xfail(strict=True, reason="BUG: malformed Brave JSON shape raises")
+
+
 @pytest.mark.parametrize(
-    "payload", [[], "str", None, {"web": None}, {"web": []}, {"web": {"results": None}}]
+    "payload",
+    [
+        pytest.param([], marks=_BUG),
+        pytest.param("str", marks=_BUG),
+        pytest.param(None, marks=_BUG),
+        pytest.param({"web": None}, marks=_BUG),
+        pytest.param({"web": []}, marks=_BUG),
+        {"web": {"results": None}},
+    ],
 )
 def test_malformed_json_shapes_do_not_raise(monkeypatch, payload):
     _patch_get(monkeypatch, lambda *a, **k: FakeResp(payload=payload))
