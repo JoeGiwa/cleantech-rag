@@ -403,3 +403,54 @@ def test_no_index_fails_fast_for_ask_and_chat(tmp_path, monkeypatch):
         assert res.exit_code != 0, args
         assert "No index found. Run build-index --limit 200 first." in res.output
     assert not (tmp_path / "chroma").exists()
+
+
+# ---------------------------------------------------------------- evaluate
+
+
+def _eval_setup(tmp_path, monkeypatch, n=5):
+    s = _settings(tmp_path)
+    lines = []
+    for i in range(1, n + 1):
+        lines.append(
+            f"**{i}. Query:** Question {i}?\n**Desired Output:** answer {i}\n"
+            f"**Referenced Articles:** {i}\n"
+        )
+    (tmp_path / cli.COMPLEX_QA_FILE).write_text("\n".join(lines), encoding="utf-8")
+    asked = []
+
+    class FakeAgent:
+        def run(self, q, thread_id=None):
+            asked.append(q)
+            return SimpleNamespace(answer="an answer", retrieved_ids=["1"], tools_used=[])
+
+    monkeypatch.setattr(cli, "get_settings", lambda: s)
+    monkeypatch.setattr(cli, "_setup_agent", lambda settings: FakeAgent())
+    monkeypatch.setattr(
+        "cleantech_rag.evaluation.metrics.default_encoder",
+        lambda *a, **k: lambda texts: [[1.0, 0.0] for _ in texts],
+    )
+    return asked
+
+
+def test_evaluate_default_runs_three_queries(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    res = runner.invoke(cli.app, ["evaluate", "--no-judge", "--output-dir", str(out)])
+    assert res.exit_code == 0, res.output
+    assert len(asked) == 3
+    assert len(list(out.glob("summary_*.json"))) == 1
+    assert len(list(out.glob("per_query_*.csv"))) == 1
+
+
+def test_evaluate_full_run_requires_confirmation(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    res = runner.invoke(cli.app, ["evaluate", "--no-judge", "--max-queries", "0"])
+    assert res.exit_code != 0
+    assert asked == []
+    res = runner.invoke(
+        cli.app,
+        ["evaluate", "--no-judge", "--yes-full-eval", "--output-dir", str(tmp_path / "o")],
+    )
+    assert res.exit_code == 0, res.output
+    assert len(asked) == 5

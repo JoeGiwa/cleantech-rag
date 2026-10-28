@@ -1,10 +1,12 @@
-"""Command line interface: ``ask``, ``chat`` and ``build-index`` commands."""
+"""Command line interface: ``ask``, ``chat``, ``build-index`` and ``evaluate`` commands."""
 
 from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime
 from pathlib import Path
+from typing import Annotated, Literal
 
 import typer
 
@@ -17,6 +19,7 @@ from cleantech_rag.evaluation.datasets import (
     load_url_index,
     map_article_ids,
 )
+from cleantech_rag.evaluation.runner import EvalItem, evaluate_items, summarize, write_outputs
 from cleantech_rag.vectorstore import build_index, estimate_cost, index_exists, load_index
 
 app = typer.Typer(help="CleanTech agentic RAG.", no_args_is_help=True, add_completion=False)
@@ -161,6 +164,81 @@ def build_index_cmd(
     chunks = chunk_documents(to_documents(df), settings.chunk_size, settings.chunk_overlap)
     build_index(chunks, settings)
     typer.echo(f"Indexed {len(chunks)} chunks into {settings.chroma_dir}.")
+
+
+DEFAULT_MAX_QUERIES = 3
+
+
+def load_eval_items(raw_dir: Path, dataset: str) -> list[EvalItem]:
+    """Load the chosen eval set as EvalItems (simple QA ids are mapped via the corpus URLs)."""
+    if dataset == "complex":
+        path = raw_dir / COMPLEX_QA_FILE
+        if not path.exists():
+            raise _fail(f"Eval file not found at {path}.")
+        return [EvalItem(q.question, q.answer, q.article_ids) for q in load_complex_qa(path)]
+    simple_path, corpus_path = raw_dir / SIMPLE_QA_FILE, raw_dir / CORPUS_FILE
+    for p in (simple_path, corpus_path):
+        if not p.exists():
+            raise _fail(f"Eval file not found at {p}.")
+    mapped, _ = map_article_ids(load_simple_qa(simple_path), load_url_index(corpus_path))
+    return [EvalItem(q.question, q.answer, q.article_ids) for q in mapped]
+
+
+@app.command()
+def evaluate(
+    dataset: Literal["complex", "simple"] = typer.Option("complex", "--dataset"),
+    max_queries: int | None = typer.Option(
+        None,
+        "--max-queries",
+        min=0,
+        help=f"Queries to run (default {DEFAULT_MAX_QUERIES}; 0 = all, needs --yes-full-eval).",
+    ),
+    no_judge: bool = typer.Option(False, "--no-judge", help="Skip the LLM judge."),
+    judge_model: str | None = typer.Option(None, "--judge-model", help="Override judge model."),
+    yes_full_eval: bool = typer.Option(
+        False, "--yes-full-eval", help="Confirm a full run over every query (costs money)."
+    ),
+    output_dir: Annotated[Path, typer.Option("--output-dir")] = Path("results"),
+) -> None:
+    """Evaluate the agent on a dataset; writes a summary JSON and a per-query CSV."""
+    if max_queries is None:
+        max_queries = 0 if yes_full_eval else DEFAULT_MAX_QUERIES
+    if max_queries == 0 and not yes_full_eval:
+        raise _fail("refusing a full evaluation run; pass --yes-full-eval to confirm.", 2)
+
+    settings = get_settings()
+    if judge_model:
+        settings = settings.model_copy(update={"judge_model": judge_model})
+    items = load_eval_items(settings.raw_data_dir, dataset)
+    if max_queries:
+        items = items[:max_queries]
+
+    agent = _setup_agent(settings)
+    judge = None
+    if not no_judge:
+        from cleantech_rag.evaluation.judge import LLMJudge
+
+        judge = LLMJudge(settings=settings)
+
+    typer.echo(f"Evaluating {len(items)} {dataset} queries...")
+    records = evaluate_items(items, agent, judge, k=settings.top_k)
+    now = datetime.now()
+    config = {
+        "dataset": dataset,
+        "n_queries_requested": len(items),
+        "max_queries": max_queries or None,
+        "k": settings.top_k,
+        "agent_model": settings.agent_model,
+        "embedding_model": settings.embedding_model,
+        "judge_enabled": judge is not None,
+        "judge_model": settings.judge_model if judge is not None else None,
+        "timestamp": now.isoformat(timespec="seconds"),
+    }
+    summary = summarize(records, config, judge_enabled=judge is not None)
+    summary_path, csv_path = write_outputs(records, summary, output_dir, now)
+    counts = summary["counts"]
+    typer.echo(f"Done: {counts['n_evaluated']} evaluated, {counts['n_errors']} errors.")
+    typer.echo(f"Summary: {summary_path}\nPer-query CSV: {csv_path}")
 
 
 def main() -> None:
