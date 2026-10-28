@@ -1,8 +1,17 @@
+from pathlib import Path
+
+import pytest
 from langchain_core.documents import Document
 from langchain_core.embeddings import DeterministicFakeEmbedding
+from langchain_core.messages import ToolMessage
 from langchain_core.vectorstores import InMemoryVectorStore
 
-from cleantech_rag.tools.retriever import make_retriever_tool, retrieve_articles
+import cleantech_rag
+from cleantech_rag.tools.retriever import (
+    format_context,
+    make_retriever_tool,
+    retrieve_articles,
+)
 
 
 def _store(docs):
@@ -63,3 +72,97 @@ def test_empty_store():
     msg = tool.invoke({"name": "retrieve", "args": {"query": "q"}, "id": "c", "type": "tool_call"})
     assert msg.artifact["article_ids"] == []
     assert "No relevant" in msg.content
+
+
+def test_best_rank_when_worse_chunk_listed_first():
+    # A's weak chunk is inserted first; the exact-match chunk must still win rank 1.
+    store = _store([_doc("weak", 1, 0), _doc("beta", 2, 0), _doc("exact query", 1, 1)])
+    res = retrieve_articles(store, "exact query", k=2)
+    assert res.article_ids[0] == 1
+    assert res.article_ids.count(1) == 1
+    assert res.documents[0].page_content == "exact query"
+
+
+def test_ids_unique_and_aligned_with_documents():
+    store = _store([_doc(f"c{i}", i % 3, i) for i in range(9)])
+    res = retrieve_articles(store, "c0", k=5)
+    assert len(res.article_ids) == len(set(res.article_ids)) == 3
+    assert [d.metadata["article_id"] for d in res.documents] == res.article_ids
+
+
+def test_overfetch_fills_k_articles_from_many_chunks():
+    # One article has many chunks that would crowd out others without over-fetching.
+    docs = [_doc(f"query {i}", 1, i) for i in range(3)] + [_doc("other", 2), _doc("more", 3)]
+    res = retrieve_articles(_store(docs), "query 0", k=3)
+    assert sorted(res.article_ids) == [1, 2, 3]
+
+
+@pytest.mark.parametrize("k", [0, -1])
+def test_non_positive_k_returns_empty(k):
+    res = retrieve_articles(_store([_doc("a", 1)]), "a", k=k)
+    assert res.article_ids == [] and res.documents == []
+
+
+def test_missing_article_id_skipped():
+    noid = Document(page_content="orphan", metadata={"title": "x"})
+    res = retrieve_articles(_store([noid, _doc("a", 1)]), "orphan", k=5)
+    assert res.article_ids == [1]
+    assert all(d.metadata.get("article_id") is not None for d in res.documents)
+
+
+def test_article_id_zero_is_kept():
+    res = retrieve_articles(_store([_doc("a", 0)]), "a", k=1)
+    assert res.article_ids == [0]
+
+
+def test_format_context_missing_metadata_fallbacks():
+    out = format_context([Document(page_content="body", metadata={})])
+    assert "Title: N/A" in out and "Date: N/A" in out and "URL: N/A" in out and "body" in out
+
+
+def test_format_context_empty_and_numbering():
+    assert format_context([]) == "No relevant articles found."
+    out = format_context([_doc("one", 1), _doc("two", 2)])
+    assert out.index("[1] Title: T1") < out.index("[2] Title: T2")
+    assert "Date: 2024-01-01" in out
+
+
+def test_tool_metadata_and_artifact_documents():
+    tool = make_retriever_tool(_store([_doc("solar", 1)]), k=1)
+    assert tool.name == "retrieve"
+    assert tool.response_format == "content_and_artifact"
+    msg = tool.invoke(
+        {"name": "retrieve", "args": {"query": "solar"}, "id": "x", "type": "tool_call"}
+    )
+    assert isinstance(msg, ToolMessage)
+    assert msg.tool_call_id == "x"
+    assert isinstance(msg.artifact["documents"][0], Document)
+
+
+def test_tool_direct_invoke_returns_content_only():
+    tool = make_retriever_tool(_store([_doc("solar", 1)]), k=1)
+    assert isinstance(tool.invoke({"query": "solar"}), str)
+
+
+def test_artifact_not_leaked_across_calls_after_empty_result():
+    store = _store([_doc("solar", 1)])
+    tool = make_retriever_tool(store, k=1)
+    call = lambda q: tool.invoke(  # noqa: E731
+        {"name": "retrieve", "args": {"query": q}, "id": "c", "type": "tool_call"}
+    )
+    first = call("solar")
+    first.artifact["article_ids"].append(999)  # mutate; must not affect later calls
+    second = call("solar")
+    assert second.artifact["article_ids"] == [1]
+
+
+def test_no_instance_state_on_tool():
+    tool = make_retriever_tool(_store([_doc("a", 1)]), k=1)
+    assert not [a for a in vars(tool) if "retrieved" in a or "last" in a]
+
+
+def test_no_summarizer_in_package():
+    root = Path(cleantech_rag.__file__).parent
+    assert not list(root.rglob("summarizer.py"))
+    for py in root.rglob("*.py"):
+        assert "summarize_and_answer" not in py.read_text()
