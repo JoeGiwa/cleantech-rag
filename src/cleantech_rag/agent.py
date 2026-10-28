@@ -15,6 +15,7 @@ from typing import Annotated, Any, Literal
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_core.vectorstores import VectorStore
 from langgraph.errors import GraphRecursionError
@@ -126,13 +127,15 @@ def build_graph(
     llm_with_tools = llm.bind_tools(tools)
     tool_node = ToolNode(tools, handle_tool_errors=True)
 
-    def agent_node(state: AgentState) -> dict[str, Any]:
+    def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         # Trim old turns here (not in a separate node) so it costs no extra graph step.
         drop = messages_to_trim(state["messages"], max_history)
         dropped = {r.id for r in drop}
         kept = [m for m in state["messages"] if m.id not in dropped]
-        first_turn = sum(isinstance(m, HumanMessage) for m in kept) <= 1
-        system = SYSTEM_PROMPT + (FIRST_TURN_NOTE if first_turn else "")
+        # Set by Agent.run only for the first turn of a chat thread (decided on the untrimmed
+        # checkpoint, before any trimming); ask/evaluate always get the plain base prompt.
+        note = config.get("configurable", {}).get("first_turn_note", False)
+        system = SYSTEM_PROMPT + (FIRST_TURN_NOTE if note else "")
         reply = llm_with_tools.invoke([SystemMessage(content=system), *kept])
         return {"messages": [*drop, reply]}
 
@@ -168,15 +171,20 @@ class Agent:
         self.recursion_limit = recursion_limit
         self._llm = llm
 
-    def run(self, question: str, thread_id: str | None = None) -> AgentResult:
+    def run(
+        self, question: str, thread_id: str | None = None, *, chat: bool = False
+    ) -> AgentResult:
         """Answer one question; on hitting the step limit return a fallback with partial state.
 
         Turns sharing a ``thread_id`` see each other's history. Without one the run uses a fresh
-        throwaway thread, so it is stateless (what evaluation needs).
+        throwaway thread, so it is stateless (what evaluation needs). ``chat=True`` (set only by
+        the chat command) adds FIRST_TURN_NOTE to the system prompt when the thread has no
+        history yet; it has no effect on stateless runs.
         """
         ephemeral = thread_id is None
         thread_id = thread_id or f"ephemeral-{uuid.uuid4()}"
         turn_id = str(uuid.uuid4())
+        first_turn_note = chat and not ephemeral and not self.history(thread_id)
         state: dict[str, Any] = {"messages": [], "retrieved_ids": []}
         stopped: Literal["completed", "step_limit"] = "completed"
         try:
@@ -184,7 +192,7 @@ class Agent:
                 {"messages": [HumanMessage(content=question, id=turn_id)], "retrieved_ids": []},
                 config={
                     "recursion_limit": self.recursion_limit,
-                    "configurable": {"thread_id": thread_id},
+                    "configurable": {"thread_id": thread_id, "first_turn_note": first_turn_note},
                 },
                 stream_mode="values",
             ):

@@ -691,17 +691,15 @@ def test_keyboard_interrupt_during_scoring_persists_answer(tmp_path, monkeypatch
     assert rows[-1]["answer"] == "answer q0" and rows[-1]["judge_pending"] is True
 
 
-def test_metrics_crash_without_log_still_reraises():
+def test_metrics_crash_without_log_still_reraises(monkeypatch):
     from cleantech_rag.evaluation import metrics
 
-    bad = FakeAgent(LOG_PLAN)
-    orig = metrics.rouge_scores
-    metrics.rouge_scores = lambda *a, **k: (_ for _ in ()).throw(ValueError("x"))
-    try:
-        with pytest.raises(ValueError):
-            evaluate_items(LOG_ITEMS[:1], bad, None, encoder=fake_encoder)
-    finally:
-        metrics.rouge_scores = orig
+    def boom(*a, **k):
+        raise ValueError("x")
+
+    monkeypatch.setattr(metrics, "rouge_scores", boom)
+    with pytest.raises(ValueError):
+        evaluate_items(LOG_ITEMS[:1], FakeAgent(LOG_PLAN), None, encoder=fake_encoder)
 
 
 def test_metrics_crash_then_resume_with_judge_scores_and_judges(tmp_path, monkeypatch):

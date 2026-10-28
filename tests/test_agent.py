@@ -6,7 +6,9 @@ from langchain_core.tools import StructuredTool
 from langchain_core.vectorstores import InMemoryVectorStore
 
 from cleantech_rag.agent import (
+    FIRST_TURN_NOTE,
     STEP_LIMIT_ANSWER,
+    SYSTEM_PROMPT,
     Agent,
     AgentResult,
     build_graph,
@@ -411,16 +413,51 @@ def test_result_sources_have_title_and_url(fake_embeddings, fake_chat_model_fact
     assert res.sources == [{"id": "5", "title": "Sun", "url": "http://s/5"}]
 
 
-def test_first_turn_note_only_without_history(fake_chat_model_factory):
+def _systems(llm):
+    return [c[0].content for c in llm.calls]
+
+
+def test_first_turn_note_only_on_chat_turn_one(fake_chat_model_factory):
     agent, llm = _stub_agent(
         fake_chat_model_factory, [AIMessage(content="a"), AIMessage(content="b")], []
     )
-    agent.run("what did you say?", thread_id="t")
-    agent.run("and now?", thread_id="t")
-    first_system = llm.calls[0][0].content
-    second_system = llm.calls[1][0].content
-    assert "no previous answer" in first_system
-    assert "no previous answer" not in second_system
+    agent.run("what did you say?", thread_id="t", chat=True)
+    agent.run("and now?", thread_id="t", chat=True)
+    first, second = _systems(llm)
+    assert first == SYSTEM_PROMPT + FIRST_TURN_NOTE
+    assert second == SYSTEM_PROMPT
+
+
+def test_no_note_for_ask_style_runs(fake_chat_model_factory):
+    agent, llm = _stub_agent(fake_chat_model_factory, [AIMessage(content="a")] * 3, [])
+    agent.run("q")  # stateless (ask / evaluate)
+    agent.run("q", thread_id="t")  # threaded but not chat
+    agent.run("q", chat=True)  # chat flag is ignored without a thread
+    assert _systems(llm) == [SYSTEM_PROMPT] * 3
+
+
+def test_evaluate_runner_path_uses_base_prompt(fake_chat_model_factory):
+    from cleantech_rag.evaluation.runner import EvalItem, evaluate_items
+
+    agent, llm = _stub_agent(fake_chat_model_factory, [AIMessage(content="a")], [])
+    evaluate_items(
+        [EvalItem("q", "ref", [])], agent, None, encoder=lambda t: [[1.0, 0.0] for _ in t]
+    )
+    assert _systems(llm) == [SYSTEM_PROMPT]
+
+
+def test_first_turn_note_not_repeated_with_zero_history(fake_chat_model_factory):
+    agent, llm = _stub_agent(
+        fake_chat_model_factory,
+        [_multi("retrieve"), AIMessage(content="a"), _multi("retrieve"), AIMessage(content="b")],
+        [_stub_tool("retrieve", ["1"])],
+        max_history=0,
+    )
+    agent.run("one", thread_id="t", chat=True)
+    agent.run("two", thread_id="t", chat=True)
+    systems = _systems(llm)
+    assert systems[:2] == [SYSTEM_PROMPT + FIRST_TURN_NOTE] * 2  # both steps of turn 1
+    assert systems[2:] == [SYSTEM_PROMPT] * 2  # turn 2, even after trimming turn 1
 
 
 def test_create_agent_wires_retrieval_overfetch(fake_chat_model_factory):

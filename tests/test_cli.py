@@ -54,7 +54,7 @@ def test_ask_prints_answer(tmp_path, monkeypatch):
     calls = {}
 
     class FakeAgent:
-        def run(self, q, thread_id=None):
+        def run(self, q, thread_id=None, **kw):
             calls["args"] = (q, thread_id)
             return SimpleNamespace(answer="the answer")
 
@@ -124,7 +124,7 @@ def test_gold_article_ids_from_complex_file(tmp_path):
 
 def _fake_agent(monkeypatch, s, calls):
     class FakeAgent:
-        def run(self, q, thread_id=None):
+        def run(self, q, thread_id=None, **kw):
             calls.append((q, thread_id))
             return SimpleNamespace(answer="ans")
 
@@ -333,7 +333,7 @@ def test_chat_help():
 
 def _chat_agent(monkeypatch, tmp_path, calls, ids=("7", "9")):
     class FakeAgent:
-        def run(self, q, thread_id=None):
+        def run(self, q, thread_id=None, **kw):
             calls.append((q, thread_id))
             return SimpleNamespace(answer=f"ans:{q}", retrieved_ids=list(ids) if q != "web" else [])
 
@@ -423,7 +423,7 @@ def _eval_setup(tmp_path, monkeypatch, n=5):
     asked = []
 
     class FakeAgent:
-        def run(self, q, thread_id=None):
+        def run(self, q, thread_id=None, **kw):
             asked.append(q)
             return SimpleNamespace(answer="an answer", retrieved_ids=["1"], tools_used=[])
 
@@ -579,7 +579,7 @@ def test_evaluate_agent_errors_reported_not_fatal(tmp_path, monkeypatch):
     _eval_setup(tmp_path, monkeypatch)
 
     class Boom:
-        def run(self, q, thread_id=None):
+        def run(self, q, thread_id=None, **kw):
             raise RuntimeError("down")
 
     monkeypatch.setattr(cli, "_setup_agent", lambda settings: Boom())
@@ -699,7 +699,7 @@ def test_evaluate_interrupt_prints_resume_hint(tmp_path, monkeypatch):
     class Boom:
         n = 0
 
-        def run(self, q, thread_id=None):
+        def run(self, q, thread_id=None, **kw):
             self.n += 1
             if self.n == 2:
                 raise KeyboardInterrupt
@@ -745,6 +745,18 @@ def test_evaluate_prints_summary_coverage_including_on_resume(tmp_path, monkeypa
 # ---------------------------------------------------------------- issue 30 cleanups
 
 
+@pytest.fixture(autouse=True)
+def _isolate_logging_and_hf_env(monkeypatch):
+    """Keep configure_logging's global side effects (env vars, handlers, levels) from leaking."""
+    for var in ("HF_HUB_DISABLE_PROGRESS_BARS", "TRANSFORMERS_VERBOSITY"):
+        monkeypatch.delenv(var, raising=False)
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    yield
+    root.handlers[:] = handlers
+    root.setLevel(level)
+
+
 @pytest.fixture
 def restore_logging():
     names = [*cli.NOISY_LOGGERS]
@@ -777,7 +789,7 @@ def test_verbose_in_root_help():
 
 def test_ask_prints_sources_with_title_url_id(tmp_path, monkeypatch):
     class FakeAgent:
-        def run(self, q, thread_id=None):
+        def run(self, q, thread_id=None, **kw):
             return SimpleNamespace(
                 answer="A",
                 retrieved_ids=["7", "9"],
@@ -803,7 +815,7 @@ def test_ask_without_retrieval_says_so(tmp_path, monkeypatch):
 
 def test_chat_shows_titles(tmp_path, monkeypatch):
     class FakeAgent:
-        def run(self, q, thread_id=None):
+        def run(self, q, thread_id=None, **kw):
             return SimpleNamespace(
                 answer="A",
                 retrieved_ids=["7"],
@@ -871,3 +883,59 @@ def test_sources_url_omitted_when_empty(capsys):
     )
     out = capsys.readouterr().out
     assert "T (ID 3)" in out and "http" not in out
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["--verbose", "ask", "Q"], ["ask", "Q", "--verbose"], ["ask", "--verbose", "Q"]],
+)
+def test_verbose_works_before_or_after_ask(tmp_path, monkeypatch, restore_logging, args):
+    _fake_agent(monkeypatch, _settings(tmp_path), [])
+    res = runner.invoke(cli.app, args)
+    assert res.exit_code == 0, res.output
+    assert logging.getLogger("httpx").getEffectiveLevel() <= logging.INFO
+
+
+def test_verbose_after_chat(tmp_path, monkeypatch, restore_logging):
+    _fake_agent(monkeypatch, _settings(tmp_path), [])
+    res = runner.invoke(cli.app, ["chat", "--verbose"], input="exit\n")
+    assert res.exit_code == 0, res.output
+    assert logging.getLogger("httpx").getEffectiveLevel() <= logging.INFO
+
+
+def test_verbose_after_build_index(tmp_path, monkeypatch, restore_logging):
+    _corpus(tmp_path)
+    monkeypatch.setattr(cli, "get_settings", lambda: _settings(tmp_path))
+    monkeypatch.setattr(cli, "gold_article_ids", lambda raw: [])
+    monkeypatch.setattr(cli, "build_index", lambda chunks, settings: None)
+    res = runner.invoke(cli.app, ["build-index", "--limit", "3", "--verbose"])
+    assert res.exit_code == 0, res.output
+    assert logging.getLogger("httpx").getEffectiveLevel() <= logging.INFO
+
+
+def test_verbose_after_evaluate(tmp_path, monkeypatch, restore_logging):
+    _eval_setup(tmp_path, monkeypatch)
+    res = _eval_invoke(tmp_path, "--no-judge", "--max-queries", "1", "--verbose")
+    assert res.exit_code == 0, res.output
+    assert logging.getLogger("httpx").getEffectiveLevel() <= logging.INFO
+
+
+def test_subcommand_without_verbose_keeps_root_verbose(tmp_path, monkeypatch, restore_logging):
+    _fake_agent(monkeypatch, _settings(tmp_path), [])
+    runner.invoke(cli.app, ["--verbose", "ask", "Q"])
+    assert logging.getLogger("httpx").getEffectiveLevel() <= logging.INFO
+
+
+def test_chat_passes_chat_flag_ask_does_not(tmp_path, monkeypatch):
+    seen = []
+
+    class FakeAgent:
+        def run(self, q, thread_id=None, **kw):
+            seen.append((thread_id is not None, kw))
+            return SimpleNamespace(answer="a")
+
+    _fake_agent(monkeypatch, _settings(tmp_path), [])
+    monkeypatch.setattr(cli, "create_agent", lambda store, llm, settings: FakeAgent())
+    runner.invoke(cli.app, ["ask", "Q"])
+    runner.invoke(cli.app, ["chat"], input="hi\nexit\n")
+    assert seen == [(False, {}), (True, {"chat": True})]

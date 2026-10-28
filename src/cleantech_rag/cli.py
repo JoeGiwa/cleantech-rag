@@ -57,12 +57,26 @@ def configure_logging(verbose: bool = False) -> None:
         os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 
+VerboseOpt = Annotated[
+    bool,
+    typer.Option(
+        "--verbose", help="Show HTTP request and model-download logs (before or after command)."
+    ),
+]
+
+
+def _apply_verbose(verbose: bool) -> None:
+    """Per-command --verbose; the root callback already configured quiet logging."""
+    if verbose:
+        configure_logging(True)
+
+
 @app.callback()
 def _root(
     verbose: bool = typer.Option(
         False,
         "--verbose",
-        help="Show HTTP request and model-download logs (put before the command).",
+        help="Show HTTP request and model-download logs (also accepted after the command).",
     ),
 ) -> None:
     configure_logging(verbose)
@@ -152,8 +166,12 @@ def _echo_sources(result) -> None:
 
 
 @app.command()
-def ask(question: str = typer.Argument(..., help="Question to ask the agent.")) -> None:
+def ask(
+    question: str = typer.Argument(..., help="Question to ask the agent."),
+    verbose: VerboseOpt = False,
+) -> None:
     """Answer one question (single-shot, no memory); use `chat` for a conversation."""
+    _apply_verbose(verbose)
     agent = _setup_agent(get_settings())
     result = agent.run(question)
     typer.echo(result.answer)
@@ -161,8 +179,9 @@ def ask(question: str = typer.Argument(..., help="Question to ask the agent.")) 
 
 
 @app.command()
-def chat() -> None:
+def chat(verbose: VerboseOpt = False) -> None:
     """Interactive chat with memory across turns. Type 'exit' (or Ctrl-D) to quit."""
+    _apply_verbose(verbose)
     agent = _setup_agent(get_settings())
     thread_id = uuid.uuid4().hex
     typer.echo("Chat started. Type 'exit' to quit.")
@@ -177,7 +196,7 @@ def chat() -> None:
             continue
         if question.lower() == "exit":
             break
-        result = agent.run(question, thread_id=thread_id)
+        result = agent.run(question, thread_id=thread_id, chat=True)
         typer.echo(result.answer)
         _echo_sources(result)
 
@@ -190,8 +209,10 @@ def build_index_cmd(
     yes_full_corpus: bool = typer.Option(
         False, "--yes-full-corpus", help="Confirm embedding the entire corpus (costs money)."
     ),
+    verbose: VerboseOpt = False,
 ) -> None:
     """Chunk the corpus and embed it into the Chroma index."""
+    _apply_verbose(verbose)
     settings = get_settings()
     corpus_path = settings.raw_data_dir / CORPUS_FILE
     if not corpus_path.exists():
@@ -259,8 +280,10 @@ def evaluate(
         Path | None,
         typer.Option("--resume", help="Continue a run log (.jsonl): skip completed questions."),
     ] = None,
+    verbose: VerboseOpt = False,
 ) -> None:
     """Evaluate the agent on a dataset; writes a summary JSON and a per-query CSV."""
+    _apply_verbose(verbose)
     if max_queries is None and not yes_full_eval:
         max_queries = DEFAULT_MAX_QUERIES
     if max_queries is not None and max_queries > MAX_QUERIES_WITHOUT_CONFIRM and not yes_full_eval:
