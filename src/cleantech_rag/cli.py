@@ -19,7 +19,14 @@ from cleantech_rag.evaluation.datasets import (
     load_url_index,
     map_article_ids,
 )
-from cleantech_rag.evaluation.runner import EvalItem, evaluate_items, summarize, write_outputs
+from cleantech_rag.evaluation.runner import (
+    EvalItem,
+    ResumeMismatchError,
+    RunLog,
+    evaluate_items,
+    summarize,
+    write_outputs,
+)
 from cleantech_rag.vectorstore import build_index, estimate_cost, index_exists, load_index
 
 app = typer.Typer(help="CleanTech agentic RAG.", no_args_is_help=True, add_completion=False)
@@ -190,8 +197,8 @@ def evaluate(
     max_queries: int | None = typer.Option(
         None,
         "--max-queries",
-        min=0,
-        help=f"Queries to run (default {DEFAULT_MAX_QUERIES}; 0 = all, needs --yes-full-eval).",
+        min=1,
+        help=f"Queries to run (default {DEFAULT_MAX_QUERIES}; --yes-full-eval alone runs all).",
     ),
     no_judge: bool = typer.Option(False, "--no-judge", help="Skip the LLM judge."),
     judge_model: str | None = typer.Option(None, "--judge-model", help="Override judge model."),
@@ -199,18 +206,20 @@ def evaluate(
         False, "--yes-full-eval", help="Confirm a full run over every query (costs money)."
     ),
     output_dir: Annotated[Path, typer.Option("--output-dir")] = Path("results"),
+    resume: Annotated[
+        Path | None,
+        typer.Option("--resume", help="Continue a run log (.jsonl): skip completed questions."),
+    ] = None,
 ) -> None:
     """Evaluate the agent on a dataset; writes a summary JSON and a per-query CSV."""
-    if max_queries is None:
-        max_queries = 0 if yes_full_eval else DEFAULT_MAX_QUERIES
-    if max_queries == 0 and not yes_full_eval:
-        raise _fail("refusing a full evaluation run; pass --yes-full-eval to confirm.", 2)
+    if max_queries is None and not yes_full_eval:
+        max_queries = DEFAULT_MAX_QUERIES
 
     settings = get_settings()
     if judge_model:
         settings = settings.model_copy(update={"judge_model": judge_model})
     items = load_eval_items(settings.raw_data_dir, dataset)
-    if max_queries:
+    if max_queries is not None:
         items = items[:max_queries]
 
     agent = _setup_agent(settings)
@@ -220,18 +229,31 @@ def evaluate(
 
         judge = LLMJudge(settings=settings)
 
-    typer.echo(f"Evaluating {len(items)} {dataset} queries...")
-    records = evaluate_items(items, agent, judge, k=settings.top_k)
     now = datetime.now()
     config = {
         "dataset": dataset,
-        "n_queries_requested": len(items),
-        "max_queries": max_queries or None,
         "k": settings.top_k,
         "agent_model": settings.agent_model,
         "embedding_model": settings.embedding_model,
         "judge_enabled": judge is not None,
         "judge_model": settings.judge_model if judge is not None else None,
+    }
+    log_path = resume or output_dir / f"run_{now.strftime('%Y%m%dT%H%M%S')}.jsonl"
+    try:
+        log = RunLog(log_path, config, resume=resume is not None)
+    except (ResumeMismatchError, FileNotFoundError, FileExistsError) as exc:
+        raise _fail(str(exc)) from exc
+
+    typer.echo(f"Evaluating {len(items)} {dataset} queries (log: {log_path})...")
+    try:
+        records = evaluate_items(items, agent, judge, k=settings.top_k, log=log)
+    except ResumeMismatchError as exc:
+        raise _fail(str(exc)) from exc
+    config = {
+        **config,
+        "n_queries_selected": len(items),
+        "max_queries": max_queries,
+        "run_log": log_path.name,
         "timestamp": now.isoformat(timespec="seconds"),
     }
     summary = summarize(records, config, judge_enabled=judge is not None)

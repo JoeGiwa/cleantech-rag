@@ -1,3 +1,4 @@
+import json
 import re
 from types import SimpleNamespace
 
@@ -461,11 +462,10 @@ def _eval_invoke(tmp_path, *args):
     return runner.invoke(cli.app, ["evaluate", "--output-dir", str(tmp_path / "out"), *args])
 
 
-def test_evaluate_full_run_refused_without_flag_default_flags(tmp_path, monkeypatch):
+def test_evaluate_zero_max_queries_rejected(tmp_path, monkeypatch):
     asked = _eval_setup(tmp_path, monkeypatch)
     res = _eval_invoke(tmp_path, "--max-queries", "0")
-    assert res.exit_code == 2
-    assert "--yes-full-eval" in res.output
+    assert res.exit_code != 0
     assert asked == [] and not (tmp_path / "out").exists()
 
 
@@ -521,7 +521,7 @@ def test_evaluate_summary_json_content_no_judge(tmp_path, monkeypatch):
     cfg = data["config"]
     assert cfg["dataset"] == "complex" and cfg["judge_enabled"] is False
     assert cfg["judge_model"] is None and cfg["max_queries"] == 3
-    assert cfg["n_queries_requested"] == 3
+    assert cfg["n_queries_selected"] == 3
     assert data["counts"]["n_queries"] == 3 and data["counts"]["n_errors"] == 0
     # gold id for Question i is "i"; fake agent always returns ["1"], so only Q1 hits
     assert data["retrieval"]["all_queries"]["n"] == 3
@@ -632,3 +632,35 @@ def test_evaluate_help_lists_flags():
     ):
         assert flag in out
     assert "complex" in out and "simple" in out
+
+
+def test_evaluate_writes_jsonl_and_resume_skips_completed(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    res = _eval_invoke(tmp_path, "--no-judge", "--max-queries", "2")
+    assert res.exit_code == 0, res.output
+    log = next((tmp_path / "out").glob("run_*.jsonl"))
+    assert len(log.read_text().splitlines()) == 3  # header + 2 rows
+    asked.clear()
+    res = _eval_invoke(tmp_path, "--no-judge", "--max-queries", "4", "--resume", str(log))
+    assert res.exit_code == 0, res.output
+    assert asked == ["Question 3?", "Question 4?"]
+    assert len(log.read_text().splitlines()) == 5
+    summaries = sorted((tmp_path / "out").glob("summary_*.json"))
+    data = json.loads(summaries[-1].read_text())
+    assert data["counts"]["n_evaluated"] == 4
+
+
+def test_evaluate_resume_mismatched_config_refused(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    assert _eval_invoke(tmp_path, "--no-judge", "--max-queries", "1").exit_code == 0
+    log = next((tmp_path / "out").glob("run_*.jsonl"))
+    asked.clear()
+    # judge enabled now differs from the log header
+    res = _eval_invoke(tmp_path, "--resume", str(log), "--max-queries", "2")
+    assert res.exit_code != 0 and asked == []
+
+
+def test_evaluate_resume_missing_file_fails(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    res = _eval_invoke(tmp_path, "--no-judge", "--resume", str(tmp_path / "nope.jsonl"))
+    assert res.exit_code != 0 and asked == []

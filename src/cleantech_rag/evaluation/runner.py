@@ -15,6 +15,12 @@ Aggregation rules:
 * Judge failures are excluded from judge averages (``n_failed`` reported). Fatal judge errors
   (auth, model not found) propagate and abort the run.
 
+Incremental results: each finished query is appended to a JSONL run log (flushed per row), so a
+crash, Ctrl-C or fatal judge error loses nothing already paid for. The first line is a header
+with the run config; resuming a log whose header or question text does not match is refused.
+Errored rows are not "completed": they are retried on resume, and the latest row per question
+wins. Summary and CSV are computed from the log, so a resumed run covers all completed rows.
+
 The agent, judge and sentence encoder are injected so tests can use fakes.
 """
 
@@ -23,7 +29,7 @@ from __future__ import annotations
 import csv
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -86,6 +92,15 @@ class QueryRecord:
     judge: JudgeResult | None = None
     error: str | None = None
 
+    def to_json(self) -> dict[str, Any]:
+        return {"type": "row", **asdict(self)}
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> QueryRecord:
+        data = {k: v for k, v in data.items() if k != "type"}
+        judge = data.pop("judge", None)
+        return cls(**data, judge=JudgeResult(**judge) if judge else None)
+
     def csv_row(self) -> dict[str, Any]:
         row: dict[str, Any] = {
             "index": self.index,
@@ -122,26 +137,93 @@ def _was_retrieval_used(result: Any, ids: list[str]) -> bool:
     return bool(ids) or any(t.get("tool") == "retrieve" and t.get("ok") for t in tools)
 
 
+class ResumeMismatchError(ValueError):
+    """The run log being resumed does not belong to this dataset/config."""
+
+
+class RunLog:
+    """Append-only JSONL log of per-query records with a config header on the first line."""
+
+    def __init__(self, path: Path, header: dict[str, Any], resume: bool = False) -> None:
+        self.path = path
+        self.header = header
+        self._latest: dict[int, QueryRecord] = {}
+        if resume:
+            self._load()
+        elif path.exists():
+            raise FileExistsError(f"{path} already exists; use --resume to continue it.")
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._write({"type": "header", "config": header})
+
+    def _write(self, obj: dict[str, Any]) -> None:
+        with self.path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(obj) + "\n")
+            fh.flush()
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            raise FileNotFoundError(f"resume file {self.path} not found.")
+        lines = [ln for ln in self.path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        first = json.loads(lines[0]) if lines else {}
+        if first.get("type") != "header":
+            raise ResumeMismatchError(f"{self.path} has no header record; not a run log.")
+        if first.get("config") != self.header:
+            raise ResumeMismatchError(
+                f"{self.path} was written with a different config "
+                f"({first.get('config')} != {self.header})."
+            )
+        for ln in lines[1:]:
+            rec = QueryRecord.from_json(json.loads(ln))
+            self._latest[rec.index] = rec  # last row per question wins
+
+    def completed(self, index: int, question: str) -> bool:
+        """True if this question finished without error. A different question text is refused."""
+        rec = self._latest.get(index)
+        if rec is None:
+            return False
+        if rec.question != question:
+            raise ResumeMismatchError(f"{self.path}: question {index} differs from the dataset.")
+        return rec.error is None
+
+    def append(self, rec: QueryRecord) -> None:
+        self._write(rec.to_json())
+        self._latest[rec.index] = rec
+
+    def records(self) -> list[QueryRecord]:
+        return [self._latest[i] for i in sorted(self._latest)]
+
+
 def evaluate_items(
     items: Sequence[EvalItem],
     agent: AgentLike,
     judge: JudgeLike | None = None,
     encoder: metrics.Encoder | None = None,
     k: int = 5,
+    log: RunLog | None = None,
 ) -> list[QueryRecord]:
-    """Run every item through the agent and score it. One record per item, in order."""
+    """Run every item through the agent and score it. One record per item, in order.
+
+    With a ``log``, questions already completed in it are skipped (the agent is not called),
+    each new record is appended as soon as it is finished, and the returned records are the
+    log's full contents.
+    """
     records: list[QueryRecord] = []
     for i, item in enumerate(items):
+        if log is not None and log.completed(i, item.question):
+            continue
         rec = QueryRecord(index=i, question=item.question, gold_ids=list(item.gold_ids))
         records.append(rec)
         try:
             result = agent.run(item.question)
-            rec.answer = str(result.answer)
+            rec.answer = result.answer or ""
             rec.retrieved_ids = [str(x) for x in (getattr(result, "retrieved_ids", None) or [])]
             rec.retrieval_used = _was_retrieval_used(result, rec.retrieved_ids)
         except Exception as exc:  # noqa: BLE001 - recorded per query, excluded from averages
             rec.retrieved_ids = []
             rec.error = f"{type(exc).__name__}: {exc}"
+            if log is not None:
+                log.append(rec)
             continue
 
         if rec.gold_ids:
@@ -161,7 +243,9 @@ def evaluate_items(
         }
         if judge is not None:
             rec.judge = judge.evaluate(item.question, rec.answer, item.reference)
-    return records
+        if log is not None:
+            log.append(rec)
+    return log.records() if log is not None else records
 
 
 def summarize(

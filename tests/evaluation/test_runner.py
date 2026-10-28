@@ -9,6 +9,8 @@ from cleantech_rag.evaluation.judge import CRITERIA, JudgeResult
 from cleantech_rag.evaluation.runner import (
     CSV_COLUMNS,
     EvalItem,
+    ResumeMismatchError,
+    RunLog,
     evaluate_items,
     summarize,
     write_outputs,
@@ -29,7 +31,7 @@ class FakeAgent:
     def run(self, question, thread_id=None):
         self.calls.append(question)
         out = self.plan[question]
-        if isinstance(out, Exception):
+        if isinstance(out, BaseException):
             raise out
         ids, tools = out
         return SimpleNamespace(answer=f"answer {question}", retrieved_ids=ids, tools_used=tools)
@@ -290,3 +292,108 @@ def test_question_with_delimiters_roundtrips_in_csv(tmp_path):
     recs = _recs(items, {items[0].question: (["a"], RET)})
     _, cp = write_outputs(recs, summarize(recs, {}, False), tmp_path, datetime(2026, 1, 1))
     assert list(csv.DictReader(cp.open()))[0]["question"] == items[0].question
+
+
+# ---------------------------------------------------------------- run log / resume
+
+HEADER = {"dataset": "complex", "k": 5}
+LOG_ITEMS = [EvalItem(f"q{i}", f"ref {i}", [str(i)]) for i in range(4)]
+LOG_PLAN = {f"q{i}": ([str(i)], RET) for i in range(4)}
+
+
+def _rows(path):
+    return [json.loads(ln) for ln in path.read_text().splitlines()][1:]
+
+
+def test_rows_appended_as_each_query_completes(tmp_path):
+    plan = dict(LOG_PLAN)
+    plan["q2"] = KeyboardInterrupt()  # not an Exception: aborts the run
+    log = RunLog(tmp_path / "run.jsonl", HEADER)
+    with pytest.raises(KeyboardInterrupt):
+        evaluate_items(LOG_ITEMS, FakeAgent(plan), None, encoder=fake_encoder, log=log)
+    assert [r["index"] for r in _rows(tmp_path / "run.jsonl")] == [0, 1]
+
+
+def test_fatal_judge_error_keeps_earlier_rows(tmp_path):
+    class Fatal:
+        def evaluate(self, query, prediction, reference):
+            if query == "q2":
+                raise RuntimeError("auth")
+            return JudgeResult(scores=dict.fromkeys(CRITERIA, 5), overall=5.0)
+
+    log = RunLog(tmp_path / "run.jsonl", HEADER)
+    with pytest.raises(RuntimeError):
+        evaluate_items(LOG_ITEMS, FakeAgent(LOG_PLAN), Fatal(), encoder=fake_encoder, log=log)
+    assert len(_rows(tmp_path / "run.jsonl")) == 2
+
+
+def test_resume_skips_completed_and_summary_covers_all(tmp_path):
+    path = tmp_path / "run.jsonl"
+    log = RunLog(path, HEADER)
+    evaluate_items(LOG_ITEMS[:2], FakeAgent(LOG_PLAN), FakeJudge(), encoder=fake_encoder, log=log)
+    agent = FakeAgent(LOG_PLAN)
+    log2 = RunLog(path, HEADER, resume=True)
+    recs = evaluate_items(LOG_ITEMS, agent, FakeJudge(), encoder=fake_encoder, log=log2)
+    assert agent.calls == ["q2", "q3"]
+    assert [r.index for r in recs] == [0, 1, 2, 3]
+    s = summarize(recs, {}, judge_enabled=True)
+    assert s["counts"]["n_evaluated"] == 4
+    assert s["judge"]["n_scored"] == 4  # judge results survive the JSON round trip
+    assert s["retrieval"]["all_queries"]["recall_at_k"] == 1.0
+
+
+def test_resume_retries_errored_rows_latest_wins(tmp_path):
+    path = tmp_path / "run.jsonl"
+    plan = dict(LOG_PLAN)
+    plan["q1"] = RuntimeError("flaky")
+    evaluate_items(
+        LOG_ITEMS[:2], FakeAgent(plan), None, encoder=fake_encoder, log=RunLog(path, HEADER)
+    )
+    agent = FakeAgent(LOG_PLAN)
+    recs = evaluate_items(
+        LOG_ITEMS[:2],
+        agent,
+        None,
+        encoder=fake_encoder,
+        log=RunLog(path, HEADER, resume=True),
+    )
+    assert agent.calls == ["q1"]
+    assert all(r.error is None for r in recs) and len(recs) == 2
+
+
+def test_resume_header_mismatch_refused(tmp_path):
+    path = tmp_path / "run.jsonl"
+    RunLog(path, HEADER)
+    with pytest.raises(ResumeMismatchError):
+        RunLog(path, {**HEADER, "dataset": "simple"}, resume=True)
+
+
+def test_resume_different_question_text_refused(tmp_path):
+    path = tmp_path / "run.jsonl"
+    log = RunLog(path, HEADER)
+    evaluate_items(LOG_ITEMS[:1], FakeAgent(LOG_PLAN), None, encoder=fake_encoder, log=log)
+    other = [EvalItem("changed", "r", ["0"])]
+    with pytest.raises(ResumeMismatchError):
+        evaluate_items(
+            other, FakeAgent({}), None, log=RunLog(path, HEADER, resume=True), encoder=fake_encoder
+        )
+
+
+def test_new_run_refuses_existing_file_and_resume_requires_header(tmp_path):
+    path = tmp_path / "run.jsonl"
+    RunLog(path, HEADER)
+    with pytest.raises(FileExistsError):
+        RunLog(path, HEADER)
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text('{"type": "row"}\n')
+    with pytest.raises(ResumeMismatchError):
+        RunLog(bad, HEADER, resume=True)
+
+
+def test_none_answer_becomes_empty_string():
+    class A:
+        def run(self, q, thread_id=None):
+            return SimpleNamespace(answer=None, retrieved_ids=[], tools_used=[])
+
+    recs = evaluate_items([EvalItem("q", "r", ["1"])], A(), None, encoder=fake_encoder)
+    assert recs[0].answer == "" and recs[0].error is None
