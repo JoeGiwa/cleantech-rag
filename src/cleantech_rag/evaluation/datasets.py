@@ -18,7 +18,9 @@ logger = logging.getLogger(__name__)
 
 _HEADER_RE = re.compile(r"^\*\*(\d+)\.\s*Query:\*\*[ \t]*", re.MULTILINE)
 _ANSWER_RE = re.compile(r"\*\*Desired Output:\*\*", re.IGNORECASE)
-_REFS_RE = re.compile(r"\*\*Referenced Articles:\*\*([^\n]*)", re.IGNORECASE)
+_REFS_RE = re.compile(
+    r"\*\*Referenced Articles:\*\*([^\n]*(?:\n[ \t]*\d[\d,\t ]*(?=\n|$))*)", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -52,8 +54,9 @@ def parse_complex_qa(text: str, *, strict: bool = False) -> list[ComplexQA]:
         block = text[h.end() : end]
         num = int(h.group(1))
         refs = _REFS_RE.search(block)
-        if refs is None:
-            msg = f"query {num}: missing 'Referenced Articles' line"
+        ids = list(dict.fromkeys(re.findall(r"\d+", refs.group(1).split("(")[0]))) if refs else []
+        if not ids:
+            msg = f"query {num}: missing or empty 'Referenced Articles' line"
             if strict:
                 raise ValueError(msg)
             logger.warning("%s; skipping", msg)
@@ -61,7 +64,6 @@ def parse_complex_qa(text: str, *, strict: bool = False) -> list[ComplexQA]:
         ans = _ANSWER_RE.search(block)
         q_end = ans.start() if ans else refs.start()
         answer = block[ans.end() : refs.start()] if ans and ans.end() <= refs.start() else ""
-        ids = list(dict.fromkeys(re.findall(r"\d+", refs.group(1).split("(")[0])))
         out.append(ComplexQA(num, block[:q_end].strip(), answer.strip(), ids))
     return out
 
