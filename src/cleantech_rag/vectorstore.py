@@ -24,13 +24,11 @@ MAX_RETRIES = 3
 BACKOFF_BASE = 1.0  # seconds; doubles each retry
 ENCODING_NAME = "cl100k_base"  # tokenizer for text-embedding-3-*
 
-# Only transient errors are retried; auth, other 4xx and everything else propagate immediately.
+# Only rate limits and timeouts are retried (same as the judge); everything else propagates.
 RETRYABLE_ERRORS: tuple[type[Exception], ...] = (
     openai.RateLimitError,
     openai.APITimeoutError,
-    openai.APIConnectionError,
     TimeoutError,
-    ConnectionError,
 )
 
 T = TypeVar("T")
@@ -99,7 +97,7 @@ def build_index(
     """Upsert chunks (ids = ``chunk_id``) into Chroma in batches; idempotent on rebuild.
 
     Each batch is embedded once, then upserted. Embedding and upserting are retried separately
-    (rate limits / timeouts / connection errors only, exponential backoff); an upsert retry
+    (rate limits / timeouts only, exponential backoff); an upsert retry
     reuses the computed embeddings."""
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
@@ -123,7 +121,7 @@ def build_index(
     )
     embedder = embeddings or _default_embeddings(settings)
     client = _client(settings)
-    collection = client.get_or_create_collection(settings.collection_name)
+    collection = client.get_or_create_collection(settings.collection_name, embedding_function=None)
     for start in range(0, len(docs), batch_size):
         batch = docs[start : start + batch_size]
         ids = [str(d.metadata["chunk_id"]) for d in batch]
