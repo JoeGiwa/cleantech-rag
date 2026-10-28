@@ -44,13 +44,14 @@ def test_ask_prints_answer(tmp_path, monkeypatch):
             return SimpleNamespace(answer="the answer")
 
     monkeypatch.setattr(cli, "get_settings", lambda: s)
+    monkeypatch.setattr(cli, "index_exists", lambda settings: True)
     monkeypatch.setattr(cli, "load_index", lambda settings: object())
     monkeypatch.setattr(cli, "_make_llm", lambda settings: object())
     monkeypatch.setattr(cli, "create_agent", lambda store, llm, settings: FakeAgent())
-    res = runner.invoke(cli.app, ["ask", "What?", "--thread-id", "t1"])
+    res = runner.invoke(cli.app, ["ask", "What?"])
     assert res.exit_code == 0
     assert "the answer" in res.output
-    assert calls["args"] == ("What?", "t1")
+    assert calls["args"] == ("What?", None)
 
 
 def test_ask_missing_openai_key(monkeypatch):
@@ -113,6 +114,7 @@ def _fake_agent(monkeypatch, s, calls):
             return SimpleNamespace(answer="ans")
 
     monkeypatch.setattr(cli, "get_settings", lambda: s)
+    monkeypatch.setattr(cli, "index_exists", lambda settings: True)
     monkeypatch.setattr(cli, "load_index", lambda settings: object())
     monkeypatch.setattr(cli, "_make_llm", lambda settings: object())
     monkeypatch.setattr(cli, "create_agent", lambda store, llm, settings: FakeAgent())
@@ -121,7 +123,7 @@ def _fake_agent(monkeypatch, s, calls):
 def test_help_lists_commands():
     res = runner.invoke(cli.app, ["--help"])
     assert res.exit_code == 0
-    assert "ask" in res.output and "build-index" in res.output
+    assert "ask" in res.output and "chat" in res.output and "build-index" in res.output
 
 
 def test_build_index_help_mentions_flags():
@@ -297,3 +299,94 @@ def test_estimate_full_corpus_unknown_model_cost_none():
     df = pd.DataFrame({"title": ["a"], "content": ["b"]})
     _, cost = cli.estimate_full_corpus(df, s)
     assert cost is None
+
+
+def test_ask_has_no_thread_id_option():
+    res = runner.invoke(cli.app, ["ask", "--help"])
+    assert res.exit_code == 0
+    assert "--thread-id" not in res.output
+    res = runner.invoke(cli.app, ["ask", "Q", "--thread-id", "x"])
+    assert res.exit_code != 0
+
+
+def test_chat_help():
+    res = runner.invoke(cli.app, ["chat", "--help"])
+    assert res.exit_code == 0
+    assert "exit" in res.output
+
+
+def _chat_agent(monkeypatch, tmp_path, calls, ids=("7", "9")):
+    class FakeAgent:
+        def run(self, q, thread_id=None):
+            calls.append((q, thread_id))
+            return SimpleNamespace(answer=f"ans:{q}", retrieved_ids=list(ids) if q != "web" else [])
+
+    monkeypatch.setattr(cli, "get_settings", lambda: _settings(tmp_path))
+    monkeypatch.setattr(cli, "index_exists", lambda settings: True)
+    monkeypatch.setattr(cli, "load_index", lambda settings: object())
+    monkeypatch.setattr(cli, "_make_llm", lambda settings: object())
+    monkeypatch.setattr(cli, "create_agent", lambda store, llm, settings: FakeAgent())
+
+
+def test_chat_multi_turn_same_thread_and_sources(tmp_path, monkeypatch):
+    calls = []
+    _chat_agent(monkeypatch, tmp_path, calls)
+    res = runner.invoke(cli.app, ["chat"], input="first\n\nweb\n  EXIT  \nnever\n")
+    assert res.exit_code == 0, res.output
+    assert [q for q, _ in calls] == ["first", "web"]
+    assert calls[0][1] and calls[0][1] == calls[1][1]
+    assert "ans:first" in res.output and "ans:web" in res.output
+    assert "7, 9" in res.output
+    assert "no articles retrieved" in res.output
+
+
+def test_chat_exits_on_eof(tmp_path, monkeypatch):
+    calls = []
+    _chat_agent(monkeypatch, tmp_path, calls)
+    res = runner.invoke(cli.app, ["chat"], input="hello\n")
+    assert res.exit_code == 0, res.output
+    assert len(calls) == 1
+
+
+def test_chat_exits_on_ctrl_c(tmp_path, monkeypatch):
+    calls = []
+    _chat_agent(monkeypatch, tmp_path, calls)
+
+    def interrupt(prompt=""):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", interrupt)
+    res = runner.invoke(cli.app, ["chat"])
+    assert res.exit_code == 0
+    assert calls == []
+
+
+def test_chat_new_session_new_thread(tmp_path, monkeypatch):
+    calls = []
+    _chat_agent(monkeypatch, tmp_path, calls)
+    runner.invoke(cli.app, ["chat"], input="a\nexit\n")
+    runner.invoke(cli.app, ["chat"], input="b\nexit\n")
+    assert calls[0][1] != calls[1][1]
+
+
+def _no_index(monkeypatch, tmp_path):
+    def boom(*a, **k):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(cli, "get_settings", lambda: _settings(tmp_path))
+    monkeypatch.setattr(cli, "create_agent", boom)
+    monkeypatch.setattr(cli, "_make_llm", boom)
+    monkeypatch.setattr(cli, "load_index", boom)
+    import langchain_openai
+
+    monkeypatch.setattr(langchain_openai, "ChatOpenAI", boom)
+    monkeypatch.setattr(langchain_openai, "OpenAIEmbeddings", boom)
+
+
+def test_no_index_fails_fast_for_ask_and_chat(tmp_path, monkeypatch):
+    _no_index(monkeypatch, tmp_path)
+    for args in (["ask", "Q"], ["chat"]):
+        res = runner.invoke(cli.app, args, input="hi\n")
+        assert res.exit_code != 0, args
+        assert "No index found. Run build-index --limit 200 first." in res.output
+    assert not (tmp_path / "chroma").exists()

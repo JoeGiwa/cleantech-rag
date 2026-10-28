@@ -1,8 +1,9 @@
-"""Command line interface: ``cleantech-rag ask`` and ``cleantech-rag build-index``."""
+"""Command line interface: ``ask``, ``chat`` and ``build-index`` commands."""
 
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
 
 import typer
@@ -16,7 +17,7 @@ from cleantech_rag.evaluation.datasets import (
     load_url_index,
     map_article_ids,
 )
-from cleantech_rag.vectorstore import build_index, estimate_cost, load_index
+from cleantech_rag.vectorstore import build_index, estimate_cost, index_exists, load_index
 
 app = typer.Typer(help="CleanTech agentic RAG.", no_args_is_help=True, add_completion=False)
 
@@ -70,16 +71,14 @@ def estimate_full_corpus(df, settings: Settings) -> tuple[int, float | None]:
     return tokens, estimate_cost(tokens, settings.embedding_model)
 
 
-@app.command()
-def ask(
-    question: str = typer.Argument(..., help="Question to ask the agent."),
-    thread_id: str | None = typer.Option(
-        None, "--thread-id", help="Conversation thread (memory is in-process only)."
-    ),
-) -> None:
-    """Answer a question using the agent (retrieval, web search, reasoning)."""
-    settings = get_settings()
+NO_INDEX_MESSAGE = "No index found. Run build-index --limit 200 first."
+
+
+def _setup_agent(settings: Settings):
+    """Shared by ask/chat: index check, key check, Brave warning, then build the agent."""
     _require_key(settings, "openai_api_key")
+    if not index_exists(settings):
+        raise _fail(NO_INDEX_MESSAGE)
     if settings.brave_api_key is None:
         typer.secho(
             "Warning: BRAVE_API_KEY is not set; web search will be unavailable.",
@@ -87,9 +86,45 @@ def ask(
             err=True,
         )
     store = load_index(settings)
-    agent = create_agent(store, _make_llm(settings), settings)
-    result = agent.run(question, thread_id=thread_id)
+    return create_agent(store, _make_llm(settings), settings)
+
+
+@app.command()
+def ask(question: str = typer.Argument(..., help="Question to ask the agent.")) -> None:
+    """Answer one question (single-shot, no memory); use `chat` for a conversation."""
+    agent = _setup_agent(get_settings())
+    result = agent.run(question)
     typer.echo(result.answer)
+
+
+def _echo_sources(result) -> None:
+    ids = list(getattr(result, "retrieved_ids", None) or [])
+    if ids:
+        typer.echo(f"Sources (article IDs): {', '.join(ids)}")
+    else:
+        typer.echo("Sources: no articles retrieved this turn.")
+
+
+@app.command()
+def chat() -> None:
+    """Interactive chat with memory across turns. Type 'exit' (or Ctrl-D) to quit."""
+    agent = _setup_agent(get_settings())
+    thread_id = uuid.uuid4().hex
+    typer.echo("Chat started. Type 'exit' to quit.")
+    while True:
+        try:
+            line = input("You> ")
+        except (EOFError, KeyboardInterrupt):
+            typer.echo("")
+            break
+        question = line.strip()
+        if not question:
+            continue
+        if question.lower() == "exit":
+            break
+        result = agent.run(question, thread_id=thread_id)
+        typer.echo(result.answer)
+        _echo_sources(result)
 
 
 @app.command("build-index")
