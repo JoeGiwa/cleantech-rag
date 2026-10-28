@@ -158,7 +158,8 @@ def load_index(settings: Settings, embeddings: Embeddings | None = None) -> Chro
 
 def index_exists(settings: Settings) -> bool:
     """True if the Chroma dir holds a non-empty collection. Offline; creates nothing."""
-    if not settings.chroma_dir.is_dir():
+    # Opening a client on a dir without a database would create an empty chroma.sqlite3.
+    if not (settings.chroma_dir / "chroma.sqlite3").is_file():
         return False
     names = {getattr(c, "name", c) for c in _client(settings).list_collections()}
     if settings.collection_name not in names:

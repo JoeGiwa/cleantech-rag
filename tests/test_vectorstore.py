@@ -370,3 +370,11 @@ def test_index_exists_cases(tmp_path, fake_embeddings):
     docs = [Document(page_content="hello", metadata={"chunk_id": "c1", "article_id": "1"})]
     build_index(docs, s, fake_embeddings)
     assert index_exists(s) is True
+
+
+def test_index_exists_leaves_empty_chroma_dir_empty(tmp_path):
+    chroma = tmp_path / "chroma"
+    chroma.mkdir()
+    s = Settings(_env_file=None, chroma_dir=chroma)
+    assert index_exists(s) is False
+    assert list(chroma.iterdir()) == []  # no stray chroma.sqlite3

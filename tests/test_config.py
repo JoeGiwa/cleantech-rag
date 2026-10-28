@@ -27,3 +27,15 @@ def test_env_overrides(monkeypatch):
 
 def test_missing_keys_ok():
     assert Settings(_env_file=None).openai_api_key is None
+
+
+def test_overfetch_default_has_single_source():
+    import inspect
+
+    from cleantech_rag.config import DEFAULT_RETRIEVAL_OVERFETCH, Settings
+    from cleantech_rag.tools.reasoning import make_reasoning_tool
+    from cleantech_rag.tools.retriever import make_retriever_tool, retrieve_articles
+
+    assert Settings(_env_file=None).retrieval_overfetch == DEFAULT_RETRIEVAL_OVERFETCH
+    for fn in (retrieve_articles, make_retriever_tool, make_reasoning_tool):
+        assert inspect.signature(fn).parameters["overfetch"].default == DEFAULT_RETRIEVAL_OVERFETCH

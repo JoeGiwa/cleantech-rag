@@ -7,6 +7,9 @@ from pathlib import Path
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Chunks fetched per wanted article; single source for Settings and the retrieval tools.
+DEFAULT_RETRIEVAL_OVERFETCH = 4
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -34,7 +37,7 @@ class Settings(BaseSettings):
     chunk_size: int = 1000
     chunk_overlap: int = 200
     top_k: int = 5
-    retrieval_overfetch: int = 4  # chunks fetched per wanted article
+    retrieval_overfetch: int = DEFAULT_RETRIEVAL_OVERFETCH  # chunks fetched per wanted article
 
     # Paths
     raw_data_dir: Path = Path("data/raw")

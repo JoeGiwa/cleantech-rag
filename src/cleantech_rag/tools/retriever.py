@@ -13,8 +13,7 @@ from langchain_core.documents import Document
 from langchain_core.tools import BaseTool, StructuredTool
 from langchain_core.vectorstores import VectorStore
 
-# Default chunks fetched per wanted article (overridable via Settings.retrieval_overfetch).
-OVERFETCH_FACTOR = 4
+from cleantech_rag.config import DEFAULT_RETRIEVAL_OVERFETCH
 
 
 @dataclass(frozen=True)
@@ -44,7 +43,7 @@ def _collapse(chunks: list[Document], k: int) -> RetrievalResult:
 
 
 def retrieve_articles(
-    store: VectorStore, query: str, k: int = 5, overfetch: int = OVERFETCH_FACTOR
+    store: VectorStore, query: str, k: int = 5, overfetch: int = DEFAULT_RETRIEVAL_OVERFETCH
 ) -> RetrievalResult:
     """Search chunks, collapse to articles at each article's best rank, return top-k articles.
 
@@ -78,7 +77,7 @@ def format_context(docs: list[Document]) -> str:
 
 
 def make_retriever_tool(
-    store: VectorStore, k: int = 5, overfetch: int = OVERFETCH_FACTOR
+    store: VectorStore, k: int = 5, overfetch: int = DEFAULT_RETRIEVAL_OVERFETCH
 ) -> BaseTool:
     """Build the `retrieve` tool. Returns (content, {"article_ids", "documents"})."""
 

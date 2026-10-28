@@ -12,7 +12,8 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool, StructuredTool
 from langchain_core.vectorstores import VectorStore
 
-from cleantech_rag.tools.retriever import OVERFETCH_FACTOR, format_context, retrieve_articles
+from cleantech_rag.config import DEFAULT_RETRIEVAL_OVERFETCH
+from cleantech_rag.tools.retriever import format_context, retrieve_articles
 
 REASONING_PROMPT = (
     "You are a careful analyst. Using ONLY the context below, answer the question by reasoning "
@@ -36,7 +37,7 @@ def message_text(content: str | list[Any]) -> str:
 
 
 def make_reasoning_tool(
-    store: VectorStore, llm: BaseChatModel, k: int = 5, overfetch: int = OVERFETCH_FACTOR
+    store: VectorStore, llm: BaseChatModel, k: int = 5, overfetch: int = DEFAULT_RETRIEVAL_OVERFETCH
 ) -> BaseTool:
     """Build the `reasoning_chain` tool. Returns (content, {"article_ids", "documents"})."""
 
