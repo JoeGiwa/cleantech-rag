@@ -169,7 +169,6 @@ def test_malformed_json_raises(tmp_path):
         report.generate_report(path, tmp_path / "out")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: report CLI shows raw traceback on bad summary JSON")
 def test_report_cli_malformed_json_clean_error(tmp_path):
     path = tmp_path / "bad.json"
     path.write_text("{not json", encoding="utf-8")
@@ -178,7 +177,6 @@ def test_report_cli_malformed_json_clean_error(tmp_path):
     assert isinstance(res.exception, SystemExit), repr(res.exception)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: report CLI shows raw traceback on bad summary JSON")
 def test_report_cli_non_object_json(tmp_path):
     path = tmp_path / "list.json"
     path.write_text("[1, 2]", encoding="utf-8")
@@ -192,3 +190,10 @@ def test_report_cli_defaults_next_to_json(tmp_path):
     res = CliRunner().invoke(cli.app, ["report", str(path)])
     assert res.exit_code == 0, res.output
     assert (tmp_path / "summary_x_response.png").exists()
+
+
+def test_load_summary_rejects_non_object(tmp_path):
+    path = tmp_path / "list.json"
+    path.write_text("[1]", encoding="utf-8")
+    with pytest.raises(ValueError):
+        report.load_summary(path)

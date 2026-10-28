@@ -391,6 +391,8 @@ def report(
         paths = generate_report(summary, output_dir or summary.parent)
     except ImportError as exc:
         raise _fail(f"{exc}. Install the extras: `uv sync --extra eval`.") from exc
+    except (ValueError, FileNotFoundError) as exc:
+        raise _fail(f"cannot read summary {summary}: {exc}") from exc
     for path in paths:
         typer.echo(f"Wrote {path}")
 

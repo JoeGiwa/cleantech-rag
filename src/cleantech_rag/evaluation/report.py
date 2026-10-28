@@ -32,7 +32,10 @@ VIEWS = (("all_queries", "All queries"), ("retrieval_only", "Retrieval-only"))
 
 
 def load_summary(path: Path) -> dict[str, Any]:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not a summary JSON (expected an object).")
+    return data
 
 
 def _fmt(value: Any, digits: int = 3) -> str:
