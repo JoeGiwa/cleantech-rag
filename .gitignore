@@ -18,6 +18,7 @@ data/
 .DS_Store
 .ruff_cache/
 .pytest_cache/
-results/*
-!results/*.json
-!results/*.png
+# Run logs (resume state) and per-query CSVs (contain dataset text) stay local;
+# summary JSON, markdown tables and charts may be committed
+results/*.jsonl
+results/per_query_*.csv

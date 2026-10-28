@@ -158,6 +158,24 @@ class CorruptLogError(ResumeMismatchError):
     """A run-log line (other than an interrupted final write) cannot be parsed."""
 
 
+def read_header(path: Path) -> dict[str, Any]:
+    """Config header (first record) of an existing run log, for ``--resume`` to inherit from."""
+    if not path.exists():
+        raise FileNotFoundError(f"resume file {path} not found.")
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        first = next((line for line in fh if line.strip()), "")
+    try:
+        data = json.loads(first)
+    except json.JSONDecodeError as exc:
+        raise ResumeMismatchError(f"{path} has no valid header record; not a run log.") from exc
+    if not isinstance(data, dict) or data.get("type") != "header":
+        raise ResumeMismatchError(f"{path} has no header record; not a run log.")
+    config = data.get("config")
+    if not isinstance(config, dict):
+        raise ResumeMismatchError(f"{path} has no header config; not a run log.")
+    return config
+
+
 class RunLog:
     """Append-only JSONL log of per-query records with a config header on the first line."""
 
