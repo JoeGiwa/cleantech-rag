@@ -3,8 +3,11 @@ import logging
 import pytest
 
 from cleantech_rag.evaluation.datasets import (
+    SimpleQA,
     load_complex_qa,
     load_simple_qa,
+    load_url_index,
+    map_article_ids,
     parse_complex_qa,
     validate,
 )
@@ -233,15 +236,11 @@ def test_simple_qa_ids_stay_str_and_blank_cells(tmp_path):
 
 
 def _simple(urls):
-    from cleantech_rag.evaluation.datasets import SimpleQA
-
     return [SimpleQA(str(i), str(i), "q", "t", "a", u) for i, u in enumerate(urls)]
 
 
 @pytest.fixture
 def mapping(tmp_path):
-    from cleantech_rag.evaluation.datasets import load_url_index
-
     corpus = tmp_path / "c.csv"
     corpus.write_text(
         "Unnamed: 0,title,url\n1,t,http://a/1\n2,t,http://b/2/\n3,t,http://dup\n4,t,http://dup\n",
@@ -251,8 +250,6 @@ def mapping(tmp_path):
 
 
 def _map(urls, index):
-    from cleantech_rag.evaluation.datasets import map_article_ids
-
     return map_article_ids(_simple(urls), index)
 
 
@@ -292,3 +289,33 @@ def test_validate_excludes_empty_id_sets(mapping):
         "queries_without_ids": 2,
         "gold_ids_missing_from_corpus": 1,
     }
+
+
+def test_load_url_index_skips_blank_urls(tmp_path):
+    corpus = tmp_path / "c.csv"
+    corpus.write_text("Unnamed: 0,url\n1,\n2,  \n3,/\n4,http://a\n", encoding="utf-8")
+    assert load_url_index(corpus) == {"http://a": ["4"]}
+
+
+def test_map_blank_url_is_unmapped(mapping):
+    mapping[""] = ["99"]  # even if an index somehow contains "", blank never maps
+    mapped, unmapped = _map(["", "  /"], mapping)
+    assert [m.article_ids for m in mapped] == [[], []] and unmapped == 2
+
+
+def test_load_url_index_accepts_id_column(tmp_path):
+    corpus = tmp_path / "c.csv"
+    corpus.write_text("id,url\n7,http://a\n", encoding="utf-8")
+    assert load_url_index(corpus) == {"http://a": ["7"]}
+
+
+def test_load_url_index_ignores_other_columns(tmp_path):
+    corpus = tmp_path / "c.csv"
+    corpus.write_text("Unnamed: 0,content,url\n1,SENTINEL_CONTENT,http://a\n", encoding="utf-8")
+    index = load_url_index(corpus)
+    assert "SENTINEL_CONTENT" not in str(index)
+
+
+def test_validate_coerces_corpus_ids_to_str():
+    qa = parse_complex_qa(TXT)
+    assert validate(qa, corpus_ids={111, 112, 222, 333, 334})["gold_ids_missing_from_corpus"] == 0

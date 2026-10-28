@@ -95,10 +95,15 @@ def _norm_url(url: str) -> str:
 
 def load_url_index(corpus_path: str | Path) -> dict[str, list[str]]:
     """Map normalized corpus ``url`` -> article IDs (str, corpus order). Loads two columns only."""
-    df = pd.read_csv(corpus_path, usecols=["url", "Unnamed: 0"], dtype=str, keep_default_na=False)
+    header = pd.read_csv(corpus_path, nrows=0).columns
+    id_col = "Unnamed: 0" if "Unnamed: 0" in header else "id"  # same rule as data.load_articles
+    df = pd.read_csv(corpus_path, usecols=["url", id_col], dtype=str, keep_default_na=False)
     index: dict[str, list[str]] = {}
-    for url, aid in zip(df["url"], df["Unnamed: 0"], strict=True):
-        ids = index.setdefault(_norm_url(url), [])
+    for url, aid in zip(df["url"], df[id_col], strict=True):
+        key = _norm_url(url)
+        if not key:
+            continue
+        ids = index.setdefault(key, [])
         if aid not in ids:
             ids.append(aid)
     return index
@@ -114,7 +119,8 @@ def map_article_ids(
     out: list[SimpleQA] = []
     unmapped = 0
     for q in items:
-        ids = url_index.get(_norm_url(q.article_url), [])
+        key = _norm_url(q.article_url)
+        ids = url_index.get(key, []) if key else []
         unmapped += not ids
         out.append(replace(q, article_ids=list(ids)))
     if unmapped:
@@ -135,7 +141,7 @@ def validate(
         "queries_without_ids": sum(not q.article_ids for q in items),
     }
     if corpus_ids is not None:
-        corpus = set(corpus_ids)
+        corpus = {str(i) for i in corpus_ids}
         gold = {i for q in items for i in q.article_ids}
         result["gold_ids_missing_from_corpus"] = len(gold - corpus)
     return result
