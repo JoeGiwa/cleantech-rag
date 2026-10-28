@@ -640,3 +640,31 @@ def test_old_log_without_attempts_field_loads(tmp_path):
         r.pop("judge_pending", None)
     path.write_text(lines[0] + "\n" + "".join(json.dumps(r) + "\n" for r in rows))
     assert RunLog(path, HEADER, resume=True).lookup(0, "q0").judge_attempts == 0
+
+
+# ---------------------------------------------------------------- answer persisted before scoring
+
+
+def test_metrics_crash_persists_answer_and_resume_does_not_rerun_agent(tmp_path, monkeypatch):
+    from cleantech_rag.evaluation import metrics
+
+    path = tmp_path / "run.jsonl"
+    items = LOG_ITEMS[:2]
+    agent = FakeAgent(LOG_PLAN)
+
+    def broken(*a, **k):
+        raise metrics.MissingEvalDependencyError("no rouge")
+
+    with monkeypatch.context() as m:
+        m.setattr(metrics, "rouge_scores", broken)
+        with pytest.raises(metrics.MissingEvalDependencyError):
+            evaluate_items(items, agent, None, encoder=fake_encoder, log=RunLog(path, HEADER))
+    rows = _rows(path)
+    assert len(rows) == 1 and rows[0]["answer"] == "answer q0" and rows[0]["response"] == {}
+    assert agent.calls == ["q0"]
+
+    log = RunLog(path, HEADER, resume=True)
+    assert not log.completed(0, "q0")  # saved but never scored
+    records = evaluate_items(items, agent, None, encoder=fake_encoder, log=log)
+    assert agent.calls == ["q0", "q1"]  # q0's agent call is not repeated
+    assert all(r.response for r in records) and records[0].answer == "answer q0"

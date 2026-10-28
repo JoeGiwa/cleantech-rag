@@ -249,8 +249,8 @@ class RunLog:
         failed are not completed, but only need judging (see ``evaluate_items``).
         """
         rec = self.lookup(index, question)
-        if rec is None or rec.error is not None:
-            return False
+        if rec is None or rec.error is not None or not rec.response:
+            return False  # empty response: saved after the agent call but never scored
         if not judge_enabled:
             return True
         return rec.judge is not None and (rec.judge.ok or rec.judge_attempts >= MAX_JUDGE_ATTEMPTS)
@@ -262,6 +262,25 @@ class RunLog:
 
     def records(self) -> list[QueryRecord]:
         return [self._latest[i] for i in sorted(self._latest)]
+
+
+def _score(rec: QueryRecord, item: EvalItem, k: int, encoder: metrics.Encoder | None) -> None:
+    """Fill ``rec.retrieval`` (if gold IDs exist) and ``rec.response`` from the saved answer."""
+    if rec.gold_ids:
+        ids, gold = rec.retrieved_ids, rec.gold_ids
+        rec.retrieval = {
+            "precision_at_k": metrics.precision_at_k(ids, gold, k),
+            "precision_at_k_retrieved": metrics.precision_at_k_retrieved(ids, gold, k),
+            "recall_at_k": metrics.recall_at_k(ids, gold, k),
+            "mrr": metrics.mrr(ids, gold),
+            "ndcg_at_k": metrics.ndcg_at_k(ids, gold, k),
+        }
+    rouge = metrics.rouge_scores(rec.answer, item.reference)
+    rec.response = {
+        **rouge,
+        "bleu": metrics.bleu_score(rec.answer, item.reference),
+        "semantic_similarity": metrics.semantic_similarity(rec.answer, item.reference, encoder),
+    }
 
 
 def evaluate_items(
@@ -276,55 +295,47 @@ def evaluate_items(
 
     With a ``log``, questions already completed in it are skipped (the agent is not called),
     each new record is appended as soon as it is finished, and the returned records are the
-    log's full contents. The agent result is saved (``judge_pending``) before judging, so a fatal
-    judge error loses no agent call; on resume such rows, and rows whose judge failed, are only
-    re-judged from the saved answer.
+    log's full contents. The agent result is saved before any scoring, so a crash in the metrics or
+    a fatal judge error loses no agent call; on resume such rows are only scored/judged from the
+    saved answer, as are rows whose judge failed.
     """
     records: list[QueryRecord] = []
     for i, item in enumerate(items):
+        saved = None
         if log is not None:
             if log.completed(i, item.question, judge is not None):
                 continue
             saved = log.lookup(i, item.question)
-            if saved is not None and saved.error is None and judge is not None:
-                saved.judge = judge.evaluate(item.question, saved.answer, item.reference)
-                saved.judge_pending = False
-                saved.judge_attempts += not saved.judge.ok
-                log.append(saved)
+        if saved is not None and saved.error is None:
+            rec = saved  # agent call already paid for: only score/judge from the saved answer
+        else:
+            rec = QueryRecord(index=i, question=item.question, gold_ids=list(item.gold_ids))
+            records.append(rec)
+            try:
+                result = agent.run(item.question)
+                rec.answer = result.answer or ""
+                rec.retrieved_ids = [str(x) for x in (getattr(result, "retrieved_ids", None) or [])]
+                rec.retrieval_used = _was_retrieval_used(result, rec.retrieved_ids)
+            except Exception as exc:  # noqa: BLE001 - recorded per query, excluded from averages
+                rec.retrieved_ids = []
+                rec.error = f"{type(exc).__name__}: {exc}"
+                if log is not None:
+                    log.append(rec)
                 continue
-        rec = QueryRecord(index=i, question=item.question, gold_ids=list(item.gold_ids))
-        records.append(rec)
-        try:
-            result = agent.run(item.question)
-            rec.answer = result.answer or ""
-            rec.retrieved_ids = [str(x) for x in (getattr(result, "retrieved_ids", None) or [])]
-            rec.retrieval_used = _was_retrieval_used(result, rec.retrieved_ids)
-        except Exception as exc:  # noqa: BLE001 - recorded per query, excluded from averages
-            rec.retrieved_ids = []
-            rec.error = f"{type(exc).__name__}: {exc}"
-            if log is not None:
-                log.append(rec)
-            continue
 
-        if rec.gold_ids:
-            ids, gold = rec.retrieved_ids, rec.gold_ids
-            rec.retrieval = {
-                "precision_at_k": metrics.precision_at_k(ids, gold, k),
-                "precision_at_k_retrieved": metrics.precision_at_k_retrieved(ids, gold, k),
-                "recall_at_k": metrics.recall_at_k(ids, gold, k),
-                "mrr": metrics.mrr(ids, gold),
-                "ndcg_at_k": metrics.ndcg_at_k(ids, gold, k),
-            }
-        rouge = metrics.rouge_scores(rec.answer, item.reference)
-        rec.response = {
-            **rouge,
-            "bleu": metrics.bleu_score(rec.answer, item.reference),
-            "semantic_similarity": metrics.semantic_similarity(rec.answer, item.reference, encoder),
-        }
+        if not rec.response:  # not yet scored (fresh row, or saved before scoring finished)
+            try:
+                _score(rec, item, k, encoder)
+            except BaseException:
+                # Persist the answer before ANY scoring can lose it (e.g. missing extras).
+                if log is not None:
+                    rec.judge_pending = judge is not None
+                    log.append(rec)
+                raise
         if judge is not None:
             if log is not None:
                 rec.judge_pending = True
-                log.append(rec)
+                log.append(rec)  # keep the scores if the judge dies fatally
             rec.judge = judge.evaluate(item.question, rec.answer, item.reference)
             rec.judge_pending = False
             rec.judge_attempts += not rec.judge.ok
