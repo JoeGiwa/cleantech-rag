@@ -378,3 +378,9 @@ def test_index_exists_leaves_empty_chroma_dir_empty(tmp_path):
     s = Settings(_env_file=None, chroma_dir=chroma)
     assert index_exists(s) is False
     assert list(chroma.iterdir()) == []  # no stray chroma.sqlite3
+
+
+def test_index_exists_missing_dir_creates_nothing(tmp_path):
+    chroma = tmp_path / "nope"
+    assert index_exists(Settings(_env_file=None, chroma_dir=chroma)) is False
+    assert not chroma.exists()

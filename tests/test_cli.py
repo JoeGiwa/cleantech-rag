@@ -829,3 +829,45 @@ def test_evaluate_checks_extras_before_any_paid_call(tmp_path, monkeypatch):
     assert "sentence-transformers" in res.output and "--extra eval" in res.output
     assert asked == []
     assert not (tmp_path / "out").exists()
+
+
+def test_configure_logging_quiet_sets_hf_env(monkeypatch, restore_logging):
+    monkeypatch.delenv("HF_HUB_DISABLE_PROGRESS_BARS", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_VERBOSITY", raising=False)
+    cli.configure_logging(False)
+    import os
+
+    assert os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] == "1"
+    assert os.environ["TRANSFORMERS_VERBOSITY"] == "error"
+    monkeypatch.delenv("HF_HUB_DISABLE_PROGRESS_BARS")
+    monkeypatch.delenv("TRANSFORMERS_VERBOSITY")
+
+
+def test_configure_logging_verbose_leaves_hf_env_alone(monkeypatch, restore_logging):
+    import os
+
+    monkeypatch.delenv("HF_HUB_DISABLE_PROGRESS_BARS", raising=False)
+    cli.configure_logging(True)
+    assert "HF_HUB_DISABLE_PROGRESS_BARS" not in os.environ
+
+
+def test_configure_logging_does_not_override_user_env(monkeypatch, restore_logging):
+    import os
+
+    monkeypatch.setenv("HF_HUB_DISABLE_PROGRESS_BARS", "0")
+    cli.configure_logging(False)
+    assert os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] == "0"
+
+
+def test_sources_with_ids_but_no_sources_attr(capsys):
+    cli._echo_sources(SimpleNamespace(retrieved_ids=["3"]))
+    out = capsys.readouterr().out
+    assert "(untitled)" in out and "ID 3" in out
+
+
+def test_sources_url_omitted_when_empty(capsys):
+    cli._echo_sources(
+        SimpleNamespace(retrieved_ids=["3"], sources=[{"id": "3", "title": "T", "url": ""}])
+    )
+    out = capsys.readouterr().out
+    assert "T (ID 3)" in out and "http" not in out

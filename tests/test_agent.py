@@ -435,3 +435,64 @@ def test_create_agent_wires_retrieval_overfetch(fake_chat_model_factory):
     agent = create_agent(Store(), llm, Settings(top_k=3, retrieval_overfetch=7, _env_file=None))
     agent.run("q")
     assert seen == [21]
+
+
+def test_sources_ignore_error_tool_messages_and_untitled_docs(fake_chat_model_factory):
+    def fn(query: str):
+        docs = [
+            Document(page_content="a", metadata={"article_id": "1"}),  # no title/url
+            Document(page_content="b", metadata={"title": "no id"}),  # no article_id
+        ]
+        return "text", {"article_ids": ["1"], "documents": docs}
+
+    tool = StructuredTool.from_function(
+        fn, name="retrieve", description="d", response_format="content_and_artifact"
+    )
+    agent, _ = _stub_agent(
+        fake_chat_model_factory, [_multi("retrieve"), AIMessage(content="x")], [tool]
+    )
+    assert agent.run("q").sources == [{"id": "1", "title": "", "url": ""}]
+
+
+def test_sources_empty_when_no_retrieval(fake_chat_model_factory):
+    agent, _ = _stub_agent(fake_chat_model_factory, [AIMessage(content="hi")], [])
+    res = agent.run("q")
+    assert res.sources == [] and res.retrieved_ids == []
+
+
+def test_sources_not_leaked_from_previous_turn(fake_embeddings, fake_chat_model_factory):
+    llm = fake_chat_model_factory(
+        [_call("retrieve", "solar", "1"), AIMessage(content="a"), AIMessage(content="b")]
+    )
+    agent = create_agent(_store(fake_embeddings), llm, Settings(top_k=3, _env_file=None))
+    assert agent.run("one", thread_id="t").sources
+    second = agent.run("two", thread_id="t")
+    assert second.sources == [{"id": i, "title": "", "url": ""} for i in second.retrieved_ids]
+    assert len(second.sources) == len(second.retrieved_ids)
+
+
+def test_non_dict_artifact_is_not_a_failure(fake_chat_model_factory):
+    agent, _ = _stub_agent(
+        fake_chat_model_factory,
+        [_multi("web_search"), AIMessage(content="x")],
+        [_stub_tool("web_search", [], artifact=False)],
+    )
+    assert agent.run("q").tools_used == [{"tool": "web_search", "ok": True}]
+
+
+def test_mixed_ok_and_failed_tools_reported_per_call(fake_chat_model_factory):
+    def bad(query: str):
+        return "failed", {"article_ids": [], "ok": False}
+
+    web = StructuredTool.from_function(
+        bad, name="web_search", description="d", response_format="content_and_artifact"
+    )
+    agent, _ = _stub_agent(
+        fake_chat_model_factory,
+        [_multi("retrieve", "web_search"), AIMessage(content="x")],
+        [_stub_tool("retrieve", ["1"]), web],
+    )
+    assert agent.run("q").tools_used == [
+        {"tool": "retrieve", "ok": True},
+        {"tool": "web_search", "ok": False},
+    ]
