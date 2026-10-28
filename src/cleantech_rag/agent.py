@@ -134,12 +134,14 @@ class Agent:
         Turns sharing a ``thread_id`` see each other's history. Without one the run uses a fresh
         throwaway thread, so it is stateless (what evaluation needs).
         """
+        ephemeral = thread_id is None
         thread_id = thread_id or f"ephemeral-{uuid.uuid4()}"
+        turn_id = str(uuid.uuid4())
         state: dict[str, Any] = {"messages": [], "retrieved_ids": []}
         stopped: Literal["completed", "step_limit"] = "completed"
         try:
             for chunk in self._graph.stream(
-                {"messages": [HumanMessage(content=question)], "retrieved_ids": []},
+                {"messages": [HumanMessage(content=question, id=turn_id)], "retrieved_ids": []},
                 config={
                     "recursion_limit": self.recursion_limit,
                     "configurable": {"thread_id": thread_id},
@@ -152,7 +154,13 @@ class Agent:
             last = state["messages"][-1] if state["messages"] else None
             if not (isinstance(last, AIMessage) and not last.tool_calls):
                 stopped = "step_limit"
-        messages = state["messages"]
+        finally:
+            if ephemeral:  # throwaway thread: don't let checkpoints pile up across runs
+                self._graph.checkpointer.delete_thread(thread_id)
+        # Per-run fields come only from this turn's messages (from its own human message on).
+        all_messages = state["messages"]
+        start = next((i for i, m in enumerate(all_messages) if m.id == turn_id), 0)
+        messages = all_messages[start:]
         tools_used = [
             {"tool": m.name, "ok": m.status != "error"}
             for m in messages

@@ -206,10 +206,6 @@ def test_retrieved_ids_do_not_leak_when_turn_two_skips_retriever(fake_chat_model
     assert r2.retrieved_ids == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: Agent.run builds tools_used from all thread messages, incl. earlier turns",
-)
 def test_tools_used_is_per_turn_not_cumulative(fake_chat_model_factory):
     agent, _ = _agent(
         fake_chat_model_factory, [_call(), AIMessage(content="A1"), AIMessage(content="A2")]
@@ -247,3 +243,12 @@ def test_messages_to_trim_pure():
     assert [r.id for r in messages_to_trim(msgs, 1)] == ["1", "2"]
     assert messages_to_trim([], 1) == []
     assert messages_to_trim(msgs, 0) == []
+
+
+def test_stateless_run_deletes_its_throwaway_thread(fake_chat_model_factory):
+    agent, _ = _agent(fake_chat_model_factory, [AIMessage(content="A")])
+    agent.run("Q1")
+    agent.run("Q2", thread_id="keep")
+    saver = agent._graph.checkpointer
+    threads = {c.config["configurable"]["thread_id"] for c in saver.list(None)}
+    assert threads == {"keep"}
