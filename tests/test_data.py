@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -40,16 +41,62 @@ def test_chunking_size_overlap_and_ids():
     assert all(c.metadata["date"] == "2024-02-03" for c in long)
     assert [c.metadata["chunk_id"] for c in long] == [f"11-{i}" for i in range(len(long))]
     # overlap: end of a chunk reappears at start of the next
-    # (chunk 0 is just the title, since the splitter breaks on the blank line first)
-    tail = " ".join(long[1].page_content.split()[-3:])
-    assert tail in long[2].page_content[:80]
+    tail = " ".join(long[0].page_content.split()[-3:])
+    assert tail in long[1].page_content[:80]
     again = chunk_documents(docs, chunk_size=200, chunk_overlap=50)
     assert [c.metadata["chunk_id"] for c in again] == [c.metadata["chunk_id"] for c in chunks]
 
 
-def test_chunking_uses_settings_defaults():
-    chunks = chunk_documents(to_documents(load_articles(CSV)))
-    assert all(len(c.page_content) <= 1000 for c in chunks)
+def test_chunking_uses_settings_defaults(monkeypatch):
+    monkeypatch.setattr(
+        "cleantech_rag.data.get_settings",
+        lambda: SimpleNamespace(chunk_size=120, chunk_overlap=20),
+    )
+    docs = [d for d in to_documents(load_articles(CSV)) if d.metadata["article_id"] == "11"]
+    chunks = chunk_documents(docs)
+    assert len(chunks) > 3
+    assert max(len(c.page_content) for c in chunks) <= 120
+    assert max(len(c.page_content) for c in chunks) > 100
+
+
+def test_every_chunk_starts_with_title_and_none_is_title_only():
+    docs = to_documents(load_articles(CSV))
+    chunks = chunk_documents(docs, chunk_size=200, chunk_overlap=50)
+    for c in chunks:
+        t = c.metadata["title"]
+        assert c.page_content.startswith(f"{t}\n\n")
+        assert c.page_content.strip() != t
+        assert len(c.page_content) <= 200
+
+
+def test_empty_title_has_no_prefix(tmp_path):
+    p = _write_csv(tmp_path, HEADER + "1,,2024-01-01,A," + "word " * 100 + ",d,u\n")
+    chunks = chunk_documents(to_documents(load_articles(p)), 100, 10)
+    assert len(chunks) > 1
+    assert all(not c.page_content.startswith("\n") for c in chunks)
+    assert all(len(c.page_content) <= 100 for c in chunks)
+
+
+def test_title_longer_than_chunk_size_still_bounded(tmp_path):
+    p = _write_csv(tmp_path, HEADER + "1," + "T" * 300 + ",2024-01-01,A," + "word " * 50 + ",d,u\n")
+    chunks = chunk_documents(to_documents(load_articles(p)), 100, 10)
+    assert chunks
+    assert all(len(c.page_content) <= 100 for c in chunks)
+
+
+def test_missing_required_columns_raise(tmp_path):
+    p = _write_csv(tmp_path, ",title,published,content\n1,T,2024-01-01,Body\n")
+    with pytest.raises(ValueError, match="date"):
+        load_articles(p)
+    p = _write_csv(tmp_path, ",title,date\n1,T,2024-01-01\n")
+    with pytest.raises(ValueError, match="content"):
+        load_articles(p)
+
+
+def test_duplicate_ids_keep_first(tmp_path):
+    p = _write_csv(tmp_path, HEADER + "1,A,2024-01-01,a,first,d,u\n1,B,2024-01-02,b,second,d,u\n")
+    df = load_articles(p)
+    assert list(df["title"]) == ["A"]
 
 
 # ---- edge cases -------------------------------------------------------------------
@@ -129,7 +176,7 @@ def test_nan_title_author_date_become_empty_strings(tmp_path):
 
 
 def test_missing_optional_columns_filled(tmp_path):
-    p = _write_csv(tmp_path, ",title,content\n5,T,Body\n")
+    p = _write_csv(tmp_path, ",title,date,content\n5,T,,Body\n")
     doc = to_documents(load_articles(p))[0]
     assert doc.metadata["article_id"] == "5"
     assert doc.metadata["date"] == ""
@@ -161,7 +208,10 @@ def test_overlap_is_honored_and_bounded():
     docs = to_documents(load_articles(CSV, include_ids=[11]))
     docs = [d for d in docs if d.metadata["article_id"] == "11"]
     chunks = chunk_documents(docs, chunk_size=200, chunk_overlap=50)
-    body = chunks[1:]  # chunk 0 is the title only
+    prefix = "Long\n\n"
+    body = [
+        c.model_copy(update={"page_content": c.page_content.removeprefix(prefix)}) for c in chunks
+    ]
     shared = []
     for a, b in zip(body, body[1:], strict=False):
         n = max(
@@ -179,6 +229,10 @@ def test_zero_overlap_has_no_shared_text():
     with_overlap = chunk_documents(docs, chunk_size=200, chunk_overlap=50)
     no_overlap = chunk_documents(docs, chunk_size=200, chunk_overlap=0)
     assert len(no_overlap) <= len(with_overlap)
+    prefix = "Long\n\n"
+    bodies = [c.page_content.removeprefix(prefix) for c in no_overlap]
+    for a, b in zip(bodies, bodies[1:], strict=False):
+        assert not any(b.startswith(a[-k:]) for k in range(3, len(a) + 1))
     assert all(len(c.page_content) <= 200 for c in no_overlap)
 
 
