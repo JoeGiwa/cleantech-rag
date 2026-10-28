@@ -666,6 +666,17 @@ def test_evaluate_resume_inherits_judge_setting(tmp_path, monkeypatch):
     assert len(asked) == 1
 
 
+def test_evaluate_resume_judge_model_on_no_judge_log_refused(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    assert _eval_invoke(tmp_path, "--no-judge", "--max-queries", "1").exit_code == 0
+    asked.clear()
+    log = _first_log(tmp_path)
+    res = _eval_invoke(tmp_path, "--resume", str(log), "--max-queries", "2", "--judge-model", "x")
+    assert res.exit_code == 1
+    assert "had no judge" in res.output
+    assert asked == []
+
+
 def test_evaluate_resume_conflicting_dataset_refused(tmp_path, monkeypatch):
     asked = _eval_setup(tmp_path, monkeypatch)
     assert _eval_invoke(tmp_path, "--no-judge", "--max-queries", "1").exit_code == 0

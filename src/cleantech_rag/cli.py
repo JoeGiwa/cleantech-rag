@@ -330,6 +330,8 @@ def evaluate(
         )
 
     settings = get_settings()
+    if resume is not None and judge_model and not stored.get("judge_enabled", True):
+        raise _fail(f"{resume}: the original run had no judge; --judge-model cannot be applied.")
     if resume is not None and not no_judge and not stored.get("judge_enabled", True):
         no_judge = True  # the original run had no judge
     if not judge_model and stored.get("judge_model"):
