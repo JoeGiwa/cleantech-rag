@@ -353,7 +353,7 @@ def test_load_nonexistent_dir_gives_empty_store(settings, fake_embeddings):
 
 
 def test_index_exists_cases(tmp_path, fake_embeddings):
-    s = Settings(_env_file=None, chroma_dir=tmp_path / "chroma", collection_name="ie")
+    s = Settings(_env_file=None, chroma_dir=tmp_path / "chroma", collection_name="ie_coll")
     assert index_exists(s) is False
     assert not (tmp_path / "chroma").exists()  # no side effect
 
@@ -362,9 +362,9 @@ def test_index_exists_cases(tmp_path, fake_embeddings):
     client = chromadb.PersistentClient(path=str(s.chroma_dir))
     client.get_or_create_collection("other")
     assert index_exists(s) is False  # dir exists, collection missing
-    assert "ie" not in {getattr(c, "name", c) for c in client.list_collections()}
+    assert "ie_coll" not in {getattr(c, "name", c) for c in client.list_collections()}
 
-    client.get_or_create_collection("ie")
+    client.get_or_create_collection("ie_coll")
     assert index_exists(s) is False  # empty collection
 
     docs = [Document(page_content="hello", metadata={"chunk_id": "c1", "article_id": "1"})]
