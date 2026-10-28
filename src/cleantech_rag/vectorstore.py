@@ -154,3 +154,13 @@ def _open(client: chromadb.ClientAPI, settings: Settings, embedder: Embeddings) 
 
 def load_index(settings: Settings, embeddings: Embeddings | None = None) -> Chroma:
     return _open(_client(settings), settings, embeddings or _default_embeddings(settings))
+
+
+def index_exists(settings: Settings) -> bool:
+    """True if the Chroma dir holds a non-empty collection. Offline; creates nothing."""
+    if not settings.chroma_dir.is_dir():
+        return False
+    names = {getattr(c, "name", c) for c in _client(settings).list_collections()}
+    if settings.collection_name not in names:
+        return False
+    return _client(settings).get_collection(settings.collection_name).count() > 0
