@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     temperature: float = 0.0
     agent_recursion_limit: int = Field(12, ge=1)  # max LangGraph steps per question
 
+    max_history: int = Field(
+        10, ge=1
+    )  # previous turns kept per thread (the current turn is always included)
+
     # Chunking / retrieval
     chunk_size: int = 1000
     chunk_overlap: int = 200
