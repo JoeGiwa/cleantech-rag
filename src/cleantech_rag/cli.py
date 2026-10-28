@@ -1,10 +1,12 @@
-"""Command line interface: ``ask``, ``chat`` and ``build-index`` commands."""
+"""Command line interface: ``ask``, ``chat``, ``build-index`` and ``evaluate`` commands."""
 
 from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime
 from pathlib import Path
+from typing import Annotated, Literal
 
 import typer
 
@@ -16,6 +18,14 @@ from cleantech_rag.evaluation.datasets import (
     load_simple_qa,
     load_url_index,
     map_article_ids,
+)
+from cleantech_rag.evaluation.runner import (
+    EvalItem,
+    ResumeMismatchError,
+    RunLog,
+    evaluate_items,
+    summarize,
+    write_outputs,
 )
 from cleantech_rag.vectorstore import build_index, estimate_cost, index_exists, load_index
 
@@ -161,6 +171,129 @@ def build_index_cmd(
     chunks = chunk_documents(to_documents(df), settings.chunk_size, settings.chunk_overlap)
     build_index(chunks, settings)
     typer.echo(f"Indexed {len(chunks)} chunks into {settings.chroma_dir}.")
+
+
+DEFAULT_MAX_QUERIES = 3
+MAX_QUERIES_WITHOUT_CONFIRM = 10  # larger runs need --yes-full-eval
+
+
+def load_eval_items(raw_dir: Path, dataset: str) -> list[EvalItem]:
+    """Load the chosen eval set as EvalItems (simple QA ids are mapped via the corpus URLs)."""
+    if dataset == "complex":
+        path = raw_dir / COMPLEX_QA_FILE
+        if not path.exists():
+            raise _fail(f"Eval file not found at {path}.")
+        return [EvalItem(q.question, q.answer, q.article_ids) for q in load_complex_qa(path)]
+    simple_path, corpus_path = raw_dir / SIMPLE_QA_FILE, raw_dir / CORPUS_FILE
+    for p in (simple_path, corpus_path):
+        if not p.exists():
+            raise _fail(f"Eval file not found at {p}.")
+    mapped, _ = map_article_ids(load_simple_qa(simple_path), load_url_index(corpus_path))
+    return [EvalItem(q.question, q.answer, q.article_ids) for q in mapped]
+
+
+@app.command()
+def evaluate(
+    dataset: Literal["complex", "simple"] = typer.Option("complex", "--dataset"),
+    max_queries: int | None = typer.Option(
+        None,
+        "--max-queries",
+        min=1,
+        help=(
+            f"Queries to run (default {DEFAULT_MAX_QUERIES}; more than "
+            f"{MAX_QUERIES_WITHOUT_CONFIRM} needs --yes-full-eval, which alone runs all)."
+        ),
+    ),
+    no_judge: bool = typer.Option(False, "--no-judge", help="Skip the LLM judge."),
+    judge_model: str | None = typer.Option(None, "--judge-model", help="Override judge model."),
+    yes_full_eval: bool = typer.Option(
+        False, "--yes-full-eval", help="Confirm a full run over every query (costs money)."
+    ),
+    output_dir: Annotated[Path, typer.Option("--output-dir")] = Path("results"),
+    resume: Annotated[
+        Path | None,
+        typer.Option("--resume", help="Continue a run log (.jsonl): skip completed questions."),
+    ] = None,
+) -> None:
+    """Evaluate the agent on a dataset; writes a summary JSON and a per-query CSV."""
+    if max_queries is None and not yes_full_eval:
+        max_queries = DEFAULT_MAX_QUERIES
+    if max_queries is not None and max_queries > MAX_QUERIES_WITHOUT_CONFIRM and not yes_full_eval:
+        raise _fail(
+            f"--max-queries {max_queries} exceeds {MAX_QUERIES_WITHOUT_CONFIRM}; "
+            "pass --yes-full-eval to confirm (this costs money).",
+            2,
+        )
+
+    settings = get_settings()
+    if judge_model:
+        settings = settings.model_copy(update={"judge_model": judge_model})
+    items = load_eval_items(settings.raw_data_dir, dataset)
+    if max_queries is not None:
+        items = items[:max_queries]
+
+    agent = _setup_agent(settings)
+    judge = None
+    if not no_judge:
+        from cleantech_rag.evaluation.judge import LLMJudge
+
+        judge = LLMJudge(settings=settings)
+
+    now = datetime.now()
+    config = {
+        "dataset": dataset,
+        "k": settings.top_k,
+        "agent_model": settings.agent_model,
+        "embedding_model": settings.embedding_model,
+        "judge_enabled": judge is not None,
+        "judge_model": settings.judge_model if judge is not None else None,
+    }
+    log_path = resume or output_dir / f"run_{now.strftime('%Y%m%dT%H%M%S')}.jsonl"
+    try:
+        log = RunLog(log_path, config, resume=resume is not None)
+    except (ResumeMismatchError, FileNotFoundError, FileExistsError) as exc:
+        raise _fail(str(exc)) from exc
+
+    if resume is not None:
+        try:
+            remaining = sum(
+                not log.completed(i, q.question, judge is not None) for i, q in enumerate(items)
+            )
+        except ResumeMismatchError as exc:
+            raise _fail(str(exc)) from exc
+        typer.echo(f"Resuming {log_path}: {remaining} of {len(items)} questions remaining.")
+    typer.echo(f"Evaluating {len(items)} {dataset} queries (log: {log_path})...")
+    try:
+        records = evaluate_items(items, agent, judge, k=settings.top_k, log=log)
+    except ResumeMismatchError as exc:
+        raise _fail(str(exc)) from exc
+    except BaseException as exc:  # Ctrl-C or a fatal (e.g. judge auth) error
+        typer.secho(
+            f"Run interrupted ({type(exc).__name__}). Completed rows are saved; "
+            f"continue with: --resume {log_path}",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        if isinstance(exc, KeyboardInterrupt):
+            raise typer.Exit(130) from exc
+        raise _fail(f"{type(exc).__name__}: {exc}") from exc
+    config = {
+        **config,
+        "n_queries_selected": len(items),
+        "max_queries": max_queries,
+        "run_log": log_path.name,
+        "timestamp": now.isoformat(timespec="seconds"),
+    }
+    summary = summarize(records, config, judge_enabled=judge is not None)
+    summary_path, csv_path = write_outputs(records, summary, output_dir, now)
+    counts = summary["counts"]
+    n_new = len(log.written)
+    typer.echo(
+        f"Summary covers {len(records)} questions "
+        f"({n_new} from this run, {len(records) - n_new} from resumed log)."
+    )
+    typer.echo(f"Done: {counts['n_evaluated']} evaluated, {counts['n_errors']} errors.")
+    typer.echo(f"Summary: {summary_path}\nPer-query CSV: {csv_path}")
 
 
 def main() -> None:
