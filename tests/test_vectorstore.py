@@ -344,3 +344,23 @@ def test_none_metadata_value_accepted(settings, fake_embeddings):
 def test_load_nonexistent_dir_gives_empty_store(settings, fake_embeddings):
     assert not settings.chroma_dir.exists()
     assert load_index(settings, fake_embeddings).similarity_search("x", k=2) == []
+
+
+def test_index_exists_cases(tmp_path, fake_embeddings):
+    s = Settings(_env_file=None, chroma_dir=tmp_path / "chroma", collection_name="ie")
+    assert index_exists(s) is False
+    assert not (tmp_path / "chroma").exists()  # no side effect
+
+    import chromadb
+
+    client = chromadb.PersistentClient(path=str(s.chroma_dir))
+    client.get_or_create_collection("other")
+    assert index_exists(s) is False  # dir exists, collection missing
+    assert "ie" not in {getattr(c, "name", c) for c in client.list_collections()}
+
+    client.get_or_create_collection("ie")
+    assert index_exists(s) is False  # empty collection
+
+    docs = [Document(page_content="hello", metadata={"chunk_id": "c1", "article_id": "1"})]
+    build_index(docs, s, fake_embeddings)
+    assert index_exists(s) is True
