@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 
@@ -94,3 +95,155 @@ def test_no_partial_with_conversation_context():
     src = Path(__file__).parent.parent / "src" / "cleantech_rag"
     for f in src.rglob("*.py"):
         assert ".partial(" not in f.read_text(), f
+
+
+# --- edge cases ---------------------------------------------------------------------------
+
+
+def _call(cid="c"):
+    return AIMessage(
+        content="", tool_calls=[{"name": "retrieve", "args": {"query": "x"}, "id": cid}]
+    )
+
+
+def test_max_history_one_keeps_only_latest_turn(fake_chat_model_factory):
+    agent, llm = _agent(
+        fake_chat_model_factory,
+        [_call("a"), AIMessage(content="A1"), _call("b"), AIMessage(content="A2")],
+        max_history=1,
+    )
+    agent.run("Q1", thread_id="t")
+    agent.run("Q2", thread_id="t")
+    assert _humans(llm.calls[-1]) == ["Q2"]
+    assert _humans(agent.history("t")) == ["Q2"]
+
+
+def test_no_orphan_tool_messages_after_trimming(fake_chat_model_factory):
+    responses = []
+    for i in range(4):
+        responses += [_call(f"c{i}"), AIMessage(content=f"A{i}")]
+    agent, llm = _agent(fake_chat_model_factory, responses, max_history=2)
+    for q in ("Q0", "Q1", "Q2", "Q3"):
+        agent.run(q, thread_id="t")
+    for msgs in [agent.history("t"), llm.calls[-1][1:]]:
+        assert isinstance(msgs[0], HumanMessage)
+        call_ids = {tc["id"] for m in msgs if isinstance(m, AIMessage) for tc in m.tool_calls}
+        tool_ids = {m.tool_call_id for m in msgs if isinstance(m, ToolMessage)}
+        assert tool_ids == call_ids
+    assert _humans(agent.history("t")) == ["Q2", "Q3"]
+
+
+def test_history_at_or_below_max_is_untouched(fake_chat_model_factory):
+    agent, _ = _agent(
+        fake_chat_model_factory,
+        [AIMessage(content="A1"), AIMessage(content="A2")],
+        max_history=2,
+    )
+    agent.run("Q1", thread_id="t")
+    agent.run("Q2", thread_id="t")
+    assert _humans(agent.history("t")) == ["Q1", "Q2"]
+
+
+def test_clear_then_reuse_thread(fake_chat_model_factory):
+    agent, llm = _agent(fake_chat_model_factory, [AIMessage(content="A1"), AIMessage(content="A2")])
+    agent.run("Q1", thread_id="t")
+    agent.clear("t")
+    agent.run("Q2", thread_id="t")
+    assert _humans(llm.calls[-1]) == ["Q2"]
+    assert all("Q1" not in str(m.content) and "A1" not in str(m.content) for m in llm.calls[-1])
+
+
+def test_clear_does_not_affect_other_threads_and_unknown_is_noop(fake_chat_model_factory):
+    agent, _ = _agent(fake_chat_model_factory, [AIMessage(content="A")])
+    agent.run("Q1", thread_id="keep")
+    agent.run("Q2", thread_id="drop")
+    agent.clear("drop")
+    agent.clear("never-existed")
+    assert _humans(agent.history("keep")) == ["Q1"]
+    assert agent.history("drop") == []
+
+
+def test_summary_empty_thread_does_not_call_llm(fake_chat_model_factory):
+    agent, llm = _agent(fake_chat_model_factory, [AIMessage(content="x")])
+    assert agent.summary("nothing") == NO_CONVERSATION
+    assert llm.calls == []
+
+
+def test_summary_after_clear_is_empty(fake_chat_model_factory):
+    agent, _ = _agent(fake_chat_model_factory, [AIMessage(content="A1")])
+    agent.run("Q1", thread_id="t")
+    agent.clear("t")
+    assert agent.summary("t") == NO_CONVERSATION
+
+
+def test_summary_reads_live_state_and_skips_tool_traffic(fake_chat_model_factory):
+    agent, llm = _agent(
+        fake_chat_model_factory,
+        [_call(), AIMessage(content="A1"), AIMessage(content="A2"), AIMessage(content="sum")],
+    )
+    agent.run("Q1", thread_id="t")
+    agent.run("Q2", thread_id="t")
+    assert agent.summary("t") == "sum"
+    prompt = llm.calls[-1][0].content
+    assert "User: Q1" in prompt and "Assistant: A1" in prompt
+    assert "User: Q2" in prompt and "Assistant: A2" in prompt
+
+
+def test_summary_without_llm_raises(fake_chat_model_factory):
+    llm = fake_chat_model_factory([AIMessage(content="A")])
+    agent = Agent(build_graph(llm, [_tool()]), 12)
+    with pytest.raises(RuntimeError):
+        agent.summary("t")
+
+
+def test_retrieved_ids_do_not_leak_when_turn_two_skips_retriever(fake_chat_model_factory):
+    agent, _ = _agent(
+        fake_chat_model_factory, [_call(), AIMessage(content="A1"), AIMessage(content="A2")]
+    )
+    r1 = agent.run("Q1", thread_id="t")
+    r2 = agent.run("Q2", thread_id="t")
+    assert r1.retrieved_ids == ["1"]
+    assert r2.retrieved_ids == []
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: Agent.run builds tools_used from all thread messages, incl. earlier turns",
+)
+def test_tools_used_is_per_turn_not_cumulative(fake_chat_model_factory):
+    agent, _ = _agent(
+        fake_chat_model_factory, [_call(), AIMessage(content="A1"), AIMessage(content="A2")]
+    )
+    assert agent.run("Q1", thread_id="t").tools_used == [{"tool": "retrieve", "ok": True}]
+    assert agent.run("Q2", thread_id="t").tools_used == []
+
+
+def test_step_limit_turn_then_next_turn_still_works(fake_chat_model_factory):
+    llm = fake_chat_model_factory([_call("a"), _call("b"), AIMessage(content="A2")])
+    agent = Agent(build_graph(llm, [_tool()], k=3), 3, llm)
+    assert agent.run("Q1", thread_id="t").stopped_reason == "step_limit"
+    llm.index = 2
+    res = agent.run("Q2", thread_id="t")
+    assert res.answer == "A2"
+    assert res.stopped_reason == "completed"
+
+
+def test_system_prompt_is_not_persisted_in_history(fake_chat_model_factory):
+    agent, _ = _agent(fake_chat_model_factory, [AIMessage(content="A1")])
+    agent.run("Q1", thread_id="t")
+    assert not any(m.type == "system" for m in agent.history("t"))
+
+
+def test_messages_to_trim_pure():
+    from cleantech_rag.memory import messages_to_trim
+
+    msgs = [
+        HumanMessage(content="a", id="1"),
+        AIMessage(content="b", id="2"),
+        HumanMessage(content="c", id="3"),
+        AIMessage(content="d", id="4"),
+    ]
+    assert messages_to_trim(msgs, 2) == []
+    assert [r.id for r in messages_to_trim(msgs, 1)] == ["1", "2"]
+    assert messages_to_trim([], 1) == []
+    assert messages_to_trim(msgs, 0) == []
