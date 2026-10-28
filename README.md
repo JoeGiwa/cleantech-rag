@@ -136,8 +136,9 @@ hidden by default.
 
 `evaluate` writes, to `--output-dir` (default `results/`): an incremental run log
 (`run_<timestamp>.jsonl`, so a crash or Ctrl-C loses nothing already paid for; continue with
-`--resume`), `summary_<timestamp>.json` and `per_query_<timestamp>.csv`. The `.jsonl` run logs are
-gitignored; summaries, tables, charts and per-query CSVs may be committed.
+`--resume`), `summary_<timestamp>.json` and `per_query_<timestamp>.csv`. The `.jsonl` run logs and
+per-query CSVs (they contain dataset text) are gitignored; summaries, tables and charts may be
+committed.
 
 **Resuming.** `evaluate --resume RUN.jsonl` takes its settings from the log's header: the dataset,
 whether the judge ran, the judge model and the query limit (`--max-queries N`, or the full run). So

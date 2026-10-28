@@ -28,7 +28,7 @@ src/cleantech_rag/
 tests/               # mirrors src layout
 data/raw/            # CSVs + CleanTech-50answers.txt (GITIGNORED, never commit)
 data/chroma/         # vector DB (GITIGNORED, rebuilt by `build-index`)
-results/             # eval outputs (commit only summary JSON + charts)
+results/             # eval outputs (commit only summary JSON, .md tables, .png charts)
 ```
 
 ## Data (not in git)
