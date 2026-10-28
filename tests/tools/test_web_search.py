@@ -162,7 +162,7 @@ def test_tool_invoke_success_artifact(monkeypatch):
         {"type": "tool_call", "name": "web_search", "args": {"query": "x"}, "id": "9"}
     )
     assert "Title: T" in msg.content
-    assert msg.artifact == {"article_ids": [], "documents": []}
+    assert msg.artifact == {"article_ids": [], "documents": [], "ok": True}
     assert msg.tool_call_id == "9"
 
 
@@ -189,3 +189,24 @@ def test_build_with_key_logs_nothing(caplog):
     with caplog.at_level("WARNING", logger=web_search.__name__):
         make_web_search_tool(_settings())
     assert caplog.records == []
+
+
+def _artifact(monkeypatch, getter, key="k"):
+    _patch_get(monkeypatch, getter)
+    msg = make_web_search_tool(_settings(key=key)).invoke(
+        {"type": "tool_call", "name": "web_search", "args": {"query": "x"}, "id": "1"}
+    )
+    return msg.artifact["ok"]
+
+
+def test_artifact_ok_false_on_failures(monkeypatch):
+    def timeout(*a, **k):
+        raise requests.Timeout()
+
+    assert _artifact(monkeypatch, timeout) is False
+    assert _artifact(monkeypatch, lambda *a, **k: FakeResp(status=500)) is False
+    assert _artifact(monkeypatch, lambda *a, **k: FakeResp(payload={}), key=None) is False
+
+
+def test_artifact_ok_true_for_no_results(monkeypatch):
+    assert _artifact(monkeypatch, lambda *a, **k: FakeResp(payload={"web": {"results": []}}))

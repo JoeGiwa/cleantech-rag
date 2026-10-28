@@ -293,3 +293,25 @@ def test_nonpositive_k_returns_zero():
     assert m.recall_at_k(["a", "b", "c"], ["b"], k=0) == 0.0
     assert m.ndcg_at_k(["a", "b", "c"], ["b"], k=-1) == 0.0
     assert m.ndcg_at_k(["a", "b", "c"], ["b"], k=0) == 0.0
+
+
+# ---------------------------------------------------------------- missing_eval_extras (issue 30)
+
+
+def test_missing_eval_extras_empty_when_installed(monkeypatch):
+    import importlib.util
+
+    from cleantech_rag.evaluation.metrics import missing_eval_extras
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
+    assert missing_eval_extras() == []
+
+
+def test_missing_eval_extras_names_packages_not_modules(monkeypatch):
+    import importlib.util
+
+    from cleantech_rag.evaluation.metrics import missing_eval_extras
+
+    gone = {"rouge_score", "sentence_transformers"}
+    monkeypatch.setattr(importlib.util, "find_spec", lambda n: None if n in gone else object())
+    assert missing_eval_extras() == ["rouge-score", "sentence-transformers"]

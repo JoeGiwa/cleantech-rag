@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from cleantech_rag.evaluation.datasets import (
     load_url_index,
     map_article_ids,
 )
+from cleantech_rag.evaluation.metrics import missing_eval_extras
 from cleantech_rag.evaluation.runner import (
     EvalItem,
     ResumeMismatchError,
@@ -30,6 +32,55 @@ from cleantech_rag.evaluation.runner import (
 from cleantech_rag.vectorstore import build_index, estimate_cost, index_exists, load_index
 
 app = typer.Typer(help="CleanTech agentic RAG.", no_args_is_help=True, add_completion=False)
+
+NOISY_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "openai",
+    "urllib3",
+    "huggingface_hub",
+    "sentence_transformers",
+    "transformers",
+    "filelock",
+)
+
+
+def configure_logging(verbose: bool = False) -> None:
+    """INFO messages always; third-party HTTP/download chatter only with ``--verbose``."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    level = logging.INFO if verbose else logging.WARNING
+    for name in NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(level)
+    if not verbose:
+        # Read when huggingface_hub is imported (lazily, on first use of the encoder).
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
+
+VerboseOpt = Annotated[
+    bool,
+    typer.Option(
+        "--verbose", help="Show HTTP request and model-download logs (before or after command)."
+    ),
+]
+
+
+def _apply_verbose(verbose: bool) -> None:
+    """Per-command --verbose; the root callback already configured quiet logging."""
+    if verbose:
+        configure_logging(True)
+
+
+@app.callback()
+def _root(
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Show HTTP request and model-download logs (also accepted after the command).",
+    ),
+) -> None:
+    configure_logging(verbose)
+
 
 CORPUS_FILE = "cleantech_media_dataset_v3_2024-10-28.csv"
 SIMPLE_QA_FILE = "cleantech_rag_evaluation_data_2024-09-20.csv"
@@ -99,25 +150,38 @@ def _setup_agent(settings: Settings):
     return create_agent(store, _make_llm(settings), settings)
 
 
+def _echo_sources(result) -> None:
+    ids = list(getattr(result, "retrieved_ids", None) or [])
+    if not ids:
+        typer.echo("Sources: no articles retrieved this turn.")
+        return
+    by_id = {s["id"]: s for s in (getattr(result, "sources", None) or [])}
+    typer.echo("Sources:")
+    for n, article_id in enumerate(ids, start=1):
+        src = by_id.get(article_id, {})
+        line = f"  [{n}] {src.get('title') or '(untitled)'} (ID {article_id})"
+        if src.get("url"):
+            line += f"\n      {src['url']}"
+        typer.echo(line)
+
+
 @app.command()
-def ask(question: str = typer.Argument(..., help="Question to ask the agent.")) -> None:
+def ask(
+    question: str = typer.Argument(..., help="Question to ask the agent."),
+    verbose: VerboseOpt = False,
+) -> None:
     """Answer one question (single-shot, no memory); use `chat` for a conversation."""
+    _apply_verbose(verbose)
     agent = _setup_agent(get_settings())
     result = agent.run(question)
     typer.echo(result.answer)
-
-
-def _echo_sources(result) -> None:
-    ids = list(getattr(result, "retrieved_ids", None) or [])
-    if ids:
-        typer.echo(f"Sources (article IDs): {', '.join(ids)}")
-    else:
-        typer.echo("Sources: no articles retrieved this turn.")
+    _echo_sources(result)
 
 
 @app.command()
-def chat() -> None:
+def chat(verbose: VerboseOpt = False) -> None:
     """Interactive chat with memory across turns. Type 'exit' (or Ctrl-D) to quit."""
+    _apply_verbose(verbose)
     agent = _setup_agent(get_settings())
     thread_id = uuid.uuid4().hex
     typer.echo("Chat started. Type 'exit' to quit.")
@@ -132,7 +196,7 @@ def chat() -> None:
             continue
         if question.lower() == "exit":
             break
-        result = agent.run(question, thread_id=thread_id)
+        result = agent.run(question, thread_id=thread_id, chat=True)
         typer.echo(result.answer)
         _echo_sources(result)
 
@@ -145,8 +209,10 @@ def build_index_cmd(
     yes_full_corpus: bool = typer.Option(
         False, "--yes-full-corpus", help="Confirm embedding the entire corpus (costs money)."
     ),
+    verbose: VerboseOpt = False,
 ) -> None:
     """Chunk the corpus and embed it into the Chroma index."""
+    _apply_verbose(verbose)
     settings = get_settings()
     corpus_path = settings.raw_data_dir / CORPUS_FILE
     if not corpus_path.exists():
@@ -214,8 +280,10 @@ def evaluate(
         Path | None,
         typer.Option("--resume", help="Continue a run log (.jsonl): skip completed questions."),
     ] = None,
+    verbose: VerboseOpt = False,
 ) -> None:
     """Evaluate the agent on a dataset; writes a summary JSON and a per-query CSV."""
+    _apply_verbose(verbose)
     if max_queries is None and not yes_full_eval:
         max_queries = DEFAULT_MAX_QUERIES
     if max_queries is not None and max_queries > MAX_QUERIES_WITHOUT_CONFIRM and not yes_full_eval:
@@ -223,6 +291,12 @@ def evaluate(
             f"--max-queries {max_queries} exceeds {MAX_QUERIES_WITHOUT_CONFIRM}; "
             "pass --yes-full-eval to confirm (this costs money).",
             2,
+        )
+
+    missing = missing_eval_extras()
+    if missing:  # before any paid call
+        raise _fail(
+            f"evaluation needs {', '.join(missing)}. Install the extras: `uv sync --extra eval`."
         )
 
     settings = get_settings()
@@ -297,7 +371,6 @@ def evaluate(
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
     app()
 
 

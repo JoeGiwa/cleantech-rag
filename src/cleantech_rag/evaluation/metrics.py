@@ -24,6 +24,20 @@ class MissingEvalDependencyError(ImportError):
     """Raised when an optional evaluation dependency is not installed."""
 
 
+EVAL_EXTRA_MODULES = {
+    "rouge-score": "rouge_score",
+    "nltk": "nltk",
+    "sentence-transformers": "sentence_transformers",
+}
+
+
+def missing_eval_extras() -> list[str]:
+    """Package names of the optional eval dependencies that are not installed (no imports)."""
+    import importlib.util
+
+    return [pkg for pkg, mod in EVAL_EXTRA_MODULES.items() if importlib.util.find_spec(mod) is None]
+
+
 def _require(module: str, package: str) -> Any:
     import importlib
 
