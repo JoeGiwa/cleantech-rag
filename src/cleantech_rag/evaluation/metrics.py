@@ -150,7 +150,7 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def default_encoder(model_name: str = DEFAULT_ENCODER_MODEL) -> Encoder:
     """Build an encoder backed by sentence-transformers (lazy import; may download weights)."""
     st = _require("sentence_transformers", "sentence-transformers")
