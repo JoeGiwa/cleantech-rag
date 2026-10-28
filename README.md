@@ -24,7 +24,7 @@ flowchart LR
         START((start)) --> A["agent node (gpt-4o-mini)"]
         A -->|tool calls| T["tools node"]
         T --> A
-        A -->|no tool calls| END((end))
+        A -->|no tool calls| END(("end"))
         T --- R["retrieve"]
         T --- W["web_search (Brave)"]
         T --- C["reasoning_chain"]
@@ -44,7 +44,7 @@ flowchart LR
         SUM --> REPORT["report: charts + table"]
     end
 
-    END --> RUN
+    RUN --> START
 ```
 
 - The agent is a hand-written `agent <-> tools` loop (`src/cleantech_rag/agent.py`). Conversation
@@ -109,7 +109,7 @@ uv run cleantech-rag chat          # interactive, remembers earlier turns; type 
 ```
 
 `ask` is single-shot with no memory; both commands print the answer followed by a numbered list of
-the retrieved source articles.
+the retrieved source articles (or `Sources: no articles retrieved this turn.` when none were).
 
 Evaluate (needs `uv sync --extra eval`; calls paid APIs, see costs below):
 
@@ -136,8 +136,16 @@ hidden by default.
 
 `evaluate` writes, to `--output-dir` (default `results/`): an incremental run log
 (`run_<timestamp>.jsonl`, so a crash or Ctrl-C loses nothing already paid for; continue with
-`--resume`), `summary_<timestamp>.json` and `per_query_<timestamp>.csv`. Only the summary JSON and
-charts are meant to be committed.
+`--resume`), `summary_<timestamp>.json` and `per_query_<timestamp>.csv`. The `.jsonl` run logs are
+gitignored; summaries, tables, charts and per-query CSVs may be committed.
+
+**Resuming.** `evaluate --resume RUN.jsonl` takes its settings from the log's header: the dataset,
+whether the judge ran, the judge model and the query limit (`--max-queries N`, or the full run). So
+resuming a full run needs no `--yes-full-eval`, and the limit does not fall back to the default of 3.
+`--max-queries` may be passed explicitly to override the logged limit (for example to extend a run).
+`--dataset`, `--no-judge` and `--judge-model` cannot change the run: passing a value that conflicts
+with the log is refused with an error. A log from an older version that did not record its query
+limit is refused unless you pass `--max-queries` or `--yes-full-eval`.
 
 `report` reads a summary JSON and writes a markdown table plus PNG charts (retrieval, response
 quality and, if the judge ran, judge scores) next to it, or into `--output-dir`. The same
@@ -169,10 +177,10 @@ These calls cost real money. The CLI has guards, and you should keep dev runs sm
 | Semantic similarity | 0.676 |
 | LLM-judge overall | 4.12 / 5 |
 
-The retrieval numbers (precision, recall, MRR, NDCG) are **suspect**: the notebook let retrieved
-IDs leak from one query into the next when the agent used web search or the reasoning tool (bug 2),
-and the first suspected parser problem with repeated article IDs (bug 5) was investigated and
-turned out to be a property of the dataset, not a parser bug (see below).
+The retrieval numbers (precision, recall, MRR, NDCG) are **suspect** because of one bug: the
+notebook let retrieved IDs leak from one query into the next when the agent used web search or the
+reasoning tool (bug 2). Bug 5 (repeated article IDs for several queries) does not affect them: it
+was a property of the dataset, not a parser bug (see below).
 
 ### Notes on interpreting retrieval metrics
 
@@ -193,7 +201,7 @@ Not run yet. These are placeholders, to be filled from a committed `summary_*.js
 
 | Metric | Baseline (suspect) | This version |
 |---|---|---|
-| Precision@5 (standard, divide by k) | 0.092 | TBD |
+| Precision@5 (divide by k, headline) | 0.092 | TBD |
 | Precision@5 (retrieved denominator) | not measured | TBD |
 | Recall@5 | 0.310 | TBD |
 | MRR | 0.357 | TBD |
@@ -219,17 +227,17 @@ These are expected effects, not measured ones.
 4. **No duplicate retrieval.** The notebook's `summarize_and_answer` tool, which re-ran retrieval,
    is gone; the agent retrieves and answers in one loop. Expect fewer LLM calls and less latency.
 5. **Dataset check for repeated IDs** (bug 5): parser verified, see above.
-6. **Metric fixes.** Standard Precision@k divides by k; the "retrieved denominator" variant is also
-   reported. BLEU tokenization was fixed so BLEU is no longer 0.0 for every query.
+6. **Metric fixes.** Precision@k keeps the notebook's divide-by-k definition as the headline; a
+   variant that divides by the number of documents actually retrieved is reported alongside it. BLEU tokenization was fixed so BLEU is no longer 0.0 for every query.
 
 ## Design decisions
 
 - **Summarizer tool dropped.** The notebook's `summarize_and_answer` tool re-ran retrieval and
   duplicated work, so it was removed from the agent's tools. The agent writes the answer from what
-  it retrieved. A conversation summary is still available programmatically as `Agent.summary()`.
-- **Both precision variants are reported.** Standard Precision@k (divide by k) is the primary
-  number; Precision@k over the retrieved count is given alongside it, since the notebook's
-  behavior was unclear to readers when fewer than k documents come back.
+  it retrieved. There is no conversation-summary feature.
+- **Both precision variants are reported.** The notebook already divided by k; that stays the
+  headline Precision@k. Precision over the retrieved count is added next to it, because the two
+  differ when fewer than k documents come back.
 - **Gold articles are always in dev samples.** `build-index --limit N` adds every eval gold
   article to the sampled articles so small indexes can answer the eval questions at all. The cost
   is that dev-sample metrics are inflated and must not be reported as results.
