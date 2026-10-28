@@ -113,17 +113,14 @@ def test_results_truncated_to_count(monkeypatch):
     assert "[3]" in out and "[4]" not in out
 
 
-_BUG = pytest.mark.xfail(strict=True, reason="BUG: malformed Brave JSON shape raises")
-
-
 @pytest.mark.parametrize(
     "payload",
     [
-        pytest.param([], marks=_BUG),
-        pytest.param("str", marks=_BUG),
-        pytest.param(None, marks=_BUG),
-        pytest.param({"web": None}, marks=_BUG),
-        pytest.param({"web": []}, marks=_BUG),
+        [],
+        "str",
+        None,
+        {"web": None},
+        {"web": []},
         {"web": {"results": None}},
     ],
 )
@@ -133,13 +130,11 @@ def test_malformed_json_shapes_do_not_raise(monkeypatch, payload):
     assert isinstance(out, str)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: non-dict result items raise")
 def test_non_dict_result_items_do_not_raise(monkeypatch):
     _patch_get(monkeypatch, lambda *a, **k: FakeResp(payload={"web": {"results": ["x", None]}}))
     assert isinstance(brave_search("q", _settings()), str)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: null description rendered as 'None'")
 def test_null_description_not_rendered_as_none(monkeypatch):
     payload = {"web": {"results": [{"title": "T", "url": "u", "description": None}]}}
     _patch_get(monkeypatch, lambda *a, **k: FakeResp(payload=payload))

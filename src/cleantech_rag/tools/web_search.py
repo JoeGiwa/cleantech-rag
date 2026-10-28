@@ -14,11 +14,11 @@ DISABLED_MESSAGE = "Web search disabled: BRAVE_API_KEY is not set."
 
 def _format_results(results: list[dict[str, Any]]) -> str:
     blocks = []
-    for i, r in enumerate(results, start=1):
+    for i, r in enumerate((r for r in results if isinstance(r, dict)), start=1):
         blocks.append(
-            f"[{i}] Title: {r.get('title', 'N/A')}\n"
-            f"URL: {r.get('url', 'N/A')}\n"
-            f"{r.get('description', '')}"
+            f"[{i}] Title: {r.get('title') or 'N/A'}\n"
+            f"URL: {r.get('url') or 'N/A'}\n"
+            f"{r.get('description') or ''}"
         )
     return "\n\n".join(blocks)
 
@@ -47,9 +47,14 @@ def brave_search(query: str, settings: Settings | None = None) -> str:
     if resp.status_code != 200:
         return f"Web search failed: Brave API returned HTTP {resp.status_code}."
     try:
-        results = resp.json().get("web", {}).get("results", [])
+        data = resp.json()
     except ValueError:
         return "Web search failed: invalid response from Brave API."
+    web = data.get("web") if isinstance(data, dict) else None
+    results = web.get("results") if isinstance(web, dict) else None
+    if not isinstance(results, list):
+        results = []
+    results = [r for r in results if isinstance(r, dict)]
     if not results:
         return "No web results found."
     return _format_results(results[: settings.brave_result_count])
