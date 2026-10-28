@@ -1,3 +1,4 @@
+import re
 from types import SimpleNamespace
 
 import pandas as pd
@@ -8,6 +9,17 @@ from cleantech_rag import cli
 from cleantech_rag.config import Settings
 
 runner = CliRunner()
+
+# Rich colours help output on CI (e.g. GitHub Actions), splitting "--limit" with
+# ANSI codes; force plain, wide output and strip anything left over.
+HELP_ENV = {"NO_COLOR": "1", "TERM": "dumb", "COLUMNS": "200"}
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _help(args):
+    """Invoke the CLI for help text; return (result, ANSI-free output)."""
+    res = runner.invoke(cli.app, args, env=HELP_ENV)
+    return res, ANSI_RE.sub("", res.output)
 
 
 def _settings(tmp_path, **kw):
@@ -121,15 +133,15 @@ def _fake_agent(monkeypatch, s, calls):
 
 
 def test_help_lists_commands():
-    res = runner.invoke(cli.app, ["--help"])
+    res, out = _help(["--help"])
     assert res.exit_code == 0
-    assert "ask" in res.output and "chat" in res.output and "build-index" in res.output
+    assert "ask" in out and "chat" in out and "build-index" in out
 
 
 def test_build_index_help_mentions_flags():
-    res = runner.invoke(cli.app, ["build-index", "--help"])
+    res, out = _help(["build-index", "--help"])
     assert res.exit_code == 0
-    assert "--limit" in res.output and "--yes-full-corpus" in res.output
+    assert "--limit" in out and "--yes-full-corpus" in out
 
 
 def test_main_is_callable():
@@ -181,8 +193,8 @@ def test_ask_requires_question():
 
 
 def test_no_args_shows_help():
-    res = runner.invoke(cli.app, [])
-    assert "build-index" in res.output
+    _, out = _help([])
+    assert "build-index" in out
 
 
 def test_build_index_limit_calls_builder_with_5_plus_gold(tmp_path, monkeypatch):
@@ -302,17 +314,18 @@ def test_estimate_full_corpus_unknown_model_cost_none():
 
 
 def test_ask_has_no_thread_id_option():
-    res = runner.invoke(cli.app, ["ask", "--help"])
+    res, out = _help(["ask", "--help"])
     assert res.exit_code == 0
-    assert "--thread-id" not in res.output
+    assert "Answer one question" in out  # guard: assert below must see real text
+    assert "--thread-id" not in out
     res = runner.invoke(cli.app, ["ask", "Q", "--thread-id", "x"])
     assert res.exit_code != 0
 
 
 def test_chat_help():
-    res = runner.invoke(cli.app, ["chat", "--help"])
+    res, out = _help(["chat", "--help"])
     assert res.exit_code == 0
-    assert "exit" in res.output
+    assert "exit" in out
 
 
 def _chat_agent(monkeypatch, tmp_path, calls, ids=("7", "9")):
