@@ -174,6 +174,7 @@ def build_index_cmd(
 
 
 DEFAULT_MAX_QUERIES = 3
+MAX_QUERIES_WITHOUT_CONFIRM = 10  # larger runs need --yes-full-eval
 
 
 def load_eval_items(raw_dir: Path, dataset: str) -> list[EvalItem]:
@@ -198,7 +199,10 @@ def evaluate(
         None,
         "--max-queries",
         min=1,
-        help=f"Queries to run (default {DEFAULT_MAX_QUERIES}; --yes-full-eval alone runs all).",
+        help=(
+            f"Queries to run (default {DEFAULT_MAX_QUERIES}; more than "
+            f"{MAX_QUERIES_WITHOUT_CONFIRM} needs --yes-full-eval, which alone runs all)."
+        ),
     ),
     no_judge: bool = typer.Option(False, "--no-judge", help="Skip the LLM judge."),
     judge_model: str | None = typer.Option(None, "--judge-model", help="Override judge model."),
@@ -214,6 +218,12 @@ def evaluate(
     """Evaluate the agent on a dataset; writes a summary JSON and a per-query CSV."""
     if max_queries is None and not yes_full_eval:
         max_queries = DEFAULT_MAX_QUERIES
+    if max_queries is not None and max_queries > MAX_QUERIES_WITHOUT_CONFIRM and not yes_full_eval:
+        raise _fail(
+            f"--max-queries {max_queries} exceeds {MAX_QUERIES_WITHOUT_CONFIRM}; "
+            "pass --yes-full-eval to confirm (this costs money).",
+            2,
+        )
 
     settings = get_settings()
     if judge_model:
@@ -246,7 +256,9 @@ def evaluate(
 
     if resume is not None:
         try:
-            remaining = sum(not log.completed(i, q.question) for i, q in enumerate(items))
+            remaining = sum(
+                not log.completed(i, q.question, judge is not None) for i, q in enumerate(items)
+            )
         except ResumeMismatchError as exc:
             raise _fail(str(exc)) from exc
         typer.echo(f"Resuming {log_path}: {remaining} of {len(items)} questions remaining.")
@@ -275,6 +287,11 @@ def evaluate(
     summary = summarize(records, config, judge_enabled=judge is not None)
     summary_path, csv_path = write_outputs(records, summary, output_dir, now)
     counts = summary["counts"]
+    n_new = len(log.written)
+    typer.echo(
+        f"Summary covers {len(records)} questions "
+        f"({n_new} from this run, {len(records) - n_new} from resumed log)."
+    )
     typer.echo(f"Done: {counts['n_evaluated']} evaluated, {counts['n_errors']} errors.")
     typer.echo(f"Summary: {summary_path}\nPer-query CSV: {csv_path}")
 

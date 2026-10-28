@@ -325,7 +325,9 @@ def test_fatal_judge_error_keeps_earlier_rows(tmp_path):
     log = RunLog(tmp_path / "run.jsonl", HEADER)
     with pytest.raises(RuntimeError):
         evaluate_items(LOG_ITEMS, FakeAgent(LOG_PLAN), Fatal(), encoder=fake_encoder, log=log)
-    assert len(_rows(tmp_path / "run.jsonl")) == 2
+    rows = _rows(tmp_path / "run.jsonl")
+    assert [r["index"] for r in rows] == [0, 0, 1, 1, 2]  # agent row, judged row, per query
+    assert rows[-1]["judge_pending"] is True and rows[-1]["judge"] is None
 
 
 def test_resume_skips_completed_and_summary_covers_all(tmp_path):
@@ -476,3 +478,92 @@ def test_summary_identical_after_reload(tmp_path):
     )
     reloaded = RunLog(path, HEADER, resume=True).records()
     assert summarize(mem, {}, True) == summarize(reloaded, {}, True)
+
+
+class CountingJudge(FakeJudge):
+    def __init__(self, fail_on=()):
+        super().__init__(fail_on)
+        self.seen = []
+
+    def evaluate(self, query, prediction, reference):
+        self.seen.append((query, prediction))
+        return super().evaluate(query, prediction, reference)
+
+
+def test_fatal_judge_error_saves_agent_row_and_resume_only_judges(tmp_path):
+    path = tmp_path / "run.jsonl"
+
+    class Fatal(CountingJudge):
+        def evaluate(self, query, prediction, reference):
+            if query == "q1":
+                raise RuntimeError("auth")
+            return super().evaluate(query, prediction, reference)
+
+    with pytest.raises(RuntimeError):
+        evaluate_items(
+            LOG_ITEMS,
+            FakeAgent(LOG_PLAN),
+            Fatal(),
+            encoder=fake_encoder,
+            log=RunLog(path, HEADER),
+        )
+    pending = RunLog(path, HEADER, resume=True).lookup(1, "q1")
+    assert pending.answer == "answer q1" and pending.judge is None and pending.judge_pending
+    assert pending.retrieval is not None and pending.response
+
+    s_mid = summarize(RunLog(path, HEADER, resume=True).records(), {}, True)
+    assert s_mid["judge"]["n_pending"] == 1 and s_mid["judge"]["n_scored"] == 1
+
+    agent, judge = FakeAgent(LOG_PLAN), CountingJudge()
+    recs = evaluate_items(
+        LOG_ITEMS,
+        agent,
+        judge,
+        encoder=fake_encoder,
+        log=RunLog(path, HEADER, resume=True),
+    )
+    assert agent.calls == ["q2", "q3"]  # q1 not re-run
+    assert judge.seen[0] == ("q1", "answer q1")  # judged from the saved answer
+    s = summarize(recs, {}, True)
+    assert s["judge"]["n_scored"] == 4 and s["judge"]["n_pending"] == 0
+
+
+def test_judge_failed_row_rejudged_without_agent_call(tmp_path):
+    path = tmp_path / "run.jsonl"
+    evaluate_items(
+        LOG_ITEMS[:2],
+        FakeAgent(LOG_PLAN),
+        FakeJudge(fail_on={"q1"}),
+        encoder=fake_encoder,
+        log=RunLog(path, HEADER),
+    )
+    agent, judge = FakeAgent(LOG_PLAN), CountingJudge()
+    recs = evaluate_items(
+        LOG_ITEMS[:2], agent, judge, encoder=fake_encoder, log=RunLog(path, HEADER, resume=True)
+    )
+    assert agent.calls == [] and [q for q, _ in judge.seen] == ["q1"]
+    assert all(r.judge.ok for r in recs)
+    assert recs[1].retrieval is not None  # metrics came from the saved row
+
+
+def test_reload_equals_in_memory_with_judge_rows(tmp_path):
+    path = tmp_path / "run.jsonl"
+    mem = evaluate_items(
+        ITEMS,
+        FakeAgent(PLAN),
+        FakeJudge(fail_on={"q3"}),
+        encoder=fake_encoder,
+        log=RunLog(path, HEADER),
+    )
+    reloaded = RunLog(path, HEADER, resume=True).records()
+    assert summarize(mem, {}, True) == summarize(reloaded, {}, True)
+
+
+def test_newline_terminated_unparsable_final_line_is_corrupt(tmp_path):
+    path = _two_row_log(tmp_path)
+    with path.open("a") as fh:
+        fh.write("{broken\n")
+    size = path.stat().st_size
+    with pytest.raises(CorruptLogError, match="line 4"):
+        RunLog(path, HEADER, resume=True)
+    assert path.stat().st_size == size  # nothing was cut

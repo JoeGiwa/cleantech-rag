@@ -709,3 +709,32 @@ def test_evaluate_interrupt_prints_resume_hint(tmp_path, monkeypatch):
     assert "--resume" in res.output and ".jsonl" in res.output
     log = next((tmp_path / "out").glob("run_*.jsonl"))
     assert len(log.read_text().splitlines()) == 2  # header + 1 row
+
+
+def test_evaluate_max_queries_over_ten_needs_confirmation(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch, n=12)
+    res = _eval_invoke(tmp_path, "--no-judge", "--max-queries", "11")
+    assert res.exit_code == 2 and asked == []
+    assert "--yes-full-eval" in res.output
+    assert not (tmp_path / "out").exists()
+    res = _eval_invoke(tmp_path, "--no-judge", "--max-queries", "11", "--yes-full-eval")
+    assert res.exit_code == 0, res.output
+    assert len(asked) == 11
+
+
+def test_evaluate_max_queries_ten_needs_no_flag(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch, n=12)
+    res = _eval_invoke(tmp_path, "--no-judge", "--max-queries", "10")
+    assert res.exit_code == 0, res.output
+    assert len(asked) == 10
+
+
+def test_evaluate_prints_summary_coverage_including_on_resume(tmp_path, monkeypatch):
+    _eval_setup(tmp_path, monkeypatch)
+    res = _eval_invoke(tmp_path, "--no-judge", "--max-queries", "2")
+    assert "Summary covers 2 questions (2 from this run, 0 from resumed log)." in res.output
+    log = next((tmp_path / "out").glob("run_*.jsonl"))
+    res = _eval_invoke(tmp_path, "--no-judge", "--max-queries", "3", "--resume", str(log))
+    assert "Summary covers 3 questions (1 from this run, 2 from resumed log)." in res.output
+    res = _eval_invoke(tmp_path, "--no-judge", "--max-queries", "1", "--resume", str(log))
+    assert "Summary covers 3 questions (0 from this run, 3 from resumed log)." in res.output

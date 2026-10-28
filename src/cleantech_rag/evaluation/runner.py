@@ -94,6 +94,9 @@ class QueryRecord:
     retrieval: dict[str, float] | None = None
     response: dict[str, float] = field(default_factory=dict)
     judge: JudgeResult | None = None
+    # True on the row saved after the agent call but before judging; superseded (latest wins)
+    # by the row written once the judge finishes.
+    judge_pending: bool = False
     error: str | None = None
 
     def to_json(self) -> dict[str, Any]:
@@ -156,6 +159,7 @@ class RunLog:
         self.path = path
         self.header = header
         self._latest: dict[int, QueryRecord] = {}
+        self.written: set[int] = set()  # question indices appended during this session
         if resume:
             self._load()
         elif path.exists():
@@ -201,7 +205,8 @@ class RunLog:
             try:
                 data = json.loads(text)
             except json.JSONDecodeError as exc:
-                if pos == len(lines) - 1:  # interrupted final write: drop the partial line
+                # interrupted final write (no trailing newline): drop the partial line
+                if pos == len(lines) - 1 and not raw.endswith(b"\n"):
                     logger.warning(
                         "%s: dropping truncated final line %d (interrupted write)",
                         self.path,
@@ -224,17 +229,27 @@ class RunLog:
                 if fh.read(1) != b"\n":
                     fh.write(b"\n")
 
-    def completed(self, index: int, question: str) -> bool:
-        """True if this question finished without error. A different question text is refused."""
+    def lookup(self, index: int, question: str) -> QueryRecord | None:
+        """Latest saved record for a question; a different question text is refused."""
         rec = self._latest.get(index)
-        if rec is None:
-            return False
-        if rec.question != question:
+        if rec is not None and rec.question != question:
             raise ResumeMismatchError(f"{self.path}: question {index} differs from the dataset.")
-        return rec.error is None
+        return rec
+
+    def completed(self, index: int, question: str, judge_enabled: bool = False) -> bool:
+        """True if no work remains: no error and, when judging, a successful judge result.
+
+        Errored rows are retried. Rows whose agent call succeeded but whose judge is pending or
+        failed are not completed, but only need judging (see ``evaluate_items``).
+        """
+        rec = self.lookup(index, question)
+        if rec is None or rec.error is not None:
+            return False
+        return not judge_enabled or (rec.judge is not None and rec.judge.ok)
 
     def append(self, rec: QueryRecord) -> None:
         self._write(rec.to_json())
+        self.written.add(rec.index)
         self._latest[rec.index] = rec
 
     def records(self) -> list[QueryRecord]:
@@ -253,12 +268,21 @@ def evaluate_items(
 
     With a ``log``, questions already completed in it are skipped (the agent is not called),
     each new record is appended as soon as it is finished, and the returned records are the
-    log's full contents.
+    log's full contents. The agent result is saved (``judge_pending``) before judging, so a fatal
+    judge error loses no agent call; on resume such rows, and rows whose judge failed, are only
+    re-judged from the saved answer.
     """
     records: list[QueryRecord] = []
     for i, item in enumerate(items):
-        if log is not None and log.completed(i, item.question):
-            continue
+        if log is not None:
+            if log.completed(i, item.question, judge is not None):
+                continue
+            saved = log.lookup(i, item.question)
+            if saved is not None and saved.error is None and judge is not None:
+                saved.judge = judge.evaluate(item.question, saved.answer, item.reference)
+                saved.judge_pending = False
+                log.append(saved)
+                continue
         rec = QueryRecord(index=i, question=item.question, gold_ids=list(item.gold_ids))
         records.append(rec)
         try:
@@ -289,7 +313,11 @@ def evaluate_items(
             "semantic_similarity": metrics.semantic_similarity(rec.answer, item.reference, encoder),
         }
         if judge is not None:
+            if log is not None:
+                rec.judge_pending = True
+                log.append(rec)
             rec.judge = judge.evaluate(item.question, rec.answer, item.reference)
+            rec.judge_pending = False
         if log is not None:
             log.append(rec)
     return log.records() if log is not None else records
@@ -314,8 +342,13 @@ def summarize(
             "retrieval_only": _retrieval_view([r for r in scored if r.retrieval_used]),
         },
         "response": {name: _mean([r.response[name] for r in ok]) for name in RESPONSE_METRICS},
+        # Rows still awaiting a judge (run died before judging) are excluded from the averages
+        # and counted in n_pending; failed judge calls are counted in n_failed.
         "judge": (
-            aggregate_judge_results([r.judge for r in ok if r.judge is not None])
+            {
+                **aggregate_judge_results([r.judge for r in ok if r.judge is not None]),
+                "n_pending": sum(r.judge is None for r in ok),
+            }
             if judge_enabled
             else None
         ),
