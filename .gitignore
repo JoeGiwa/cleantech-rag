@@ -15,3 +15,9 @@ data/
 !.env.example
 .claude/settings.local.json
 .agent-logs/
+.DS_Store
+.ruff_cache/
+.pytest_cache/
+results/*
+!results/*.json
+!results/*.png

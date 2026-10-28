@@ -23,5 +23,4 @@ jobs:
           uv run ruff check .
           uv run ruff format --check .
       - name: Test
-        # exit code 5 = no tests collected yet; don't fail a fresh repo for that
-        run: uv run pytest -q || [ $? -eq 5 ]
+        run: uv run pytest -q
