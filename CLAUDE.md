@@ -20,7 +20,7 @@ src/cleantech_rag/
   config.py          # pydantic-settings / env vars, model names, paths
   data.py            # load + clean CSV → Documents (chunking here)
   vectorstore.py     # build / load Chroma
-  tools/             # retriever.py, summarizer.py, web_search.py, reasoning.py
+  tools/             # retriever.py, web_search.py, reasoning.py
   memory.py          # conversation memory
   agent.py           # LangGraph agent wiring
   cli.py             # `uv run cleantech-rag ask "..."`, `build-index`, `evaluate`

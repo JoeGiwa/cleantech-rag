@@ -2,7 +2,7 @@
 name: implementer
 description: Implements exactly one GitHub issue on the current branch, with tests. Use for any coding task tied to an issue number.
 tools: Read, Grep, Glob, Bash, Edit, Write
-model: inherit
+model: sonnet
 ---
 You are the implementer. You work on ONE issue, on the current (non-main) branch, in the current
 worktree. Other agents are working in other worktrees at the same time, so never touch files outside
