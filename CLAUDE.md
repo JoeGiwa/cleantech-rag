@@ -46,6 +46,9 @@ results/             # eval outputs (commit only summary JSON + charts)
 - Test: `uv run pytest -q`
 - Lint: `uv run ruff check . && uv run ruff format --check .`
 
+## Conventions
+- Article IDs are str everywhere (loader, retriever, parsers, eval).
+
 ## COST RULES (these calls cost real money)
 - NEVER embed the full corpus, run the full 50-question eval, or call gpt-4o yourself. Ask Joe first.
 - For dev runs use a sample: `--limit 200` articles, `--max-queries 3`.
