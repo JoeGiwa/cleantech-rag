@@ -8,7 +8,7 @@ artifacts, so IDs cannot leak between queries.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -46,8 +46,10 @@ Always prioritize accuracy and cite your sources when possible."""
 class AgentResult:
     answer: str
     retrieved_ids: list[str] = field(default_factory=list)
-    tools_used: list[dict[str, Any]] = field(default_factory=list)  # [{"tool", "ok"}], call order
-    stopped_reason: str = "completed"  # "completed" or "step_limit"
+    # Executed tool calls in call order: [{"tool": name, "ok": bool}]. ok means the tool did not
+    # raise/error (web_search soft-failure strings, e.g. "No web results found.", count as ok).
+    tools_used: list[dict[str, Any]] = field(default_factory=list)
+    stopped_reason: Literal["completed", "step_limit"] = "completed"
 
 
 STEP_LIMIT_ANSWER = (
@@ -115,7 +117,7 @@ class Agent:
     def run(self, question: str) -> AgentResult:
         """Answer one question; on hitting the step limit return a fallback with partial state."""
         state: dict[str, Any] = {"messages": [], "retrieved_ids": []}
-        stopped = "completed"
+        stopped: Literal["completed", "step_limit"] = "completed"
         try:
             for chunk in self._graph.stream(
                 {"messages": [HumanMessage(content=question)], "retrieved_ids": []},
@@ -124,7 +126,10 @@ class Agent:
             ):
                 state = chunk  # keep the latest full state
         except GraphRecursionError:
-            stopped = "step_limit"
+            # The limit can trip right after the agent's final answer; that is still a completion.
+            last = state["messages"][-1] if state["messages"] else None
+            if not (isinstance(last, AIMessage) and not last.tool_calls):
+                stopped = "step_limit"
         messages = state["messages"]
         tools_used = [
             {"tool": m.name, "ok": m.status != "error"}
@@ -153,4 +158,6 @@ def create_agent(
         make_reasoning_tool(store, llm, k=k, overfetch=over),
     ]
     graph = build_graph(llm, tools, k=k)
-    return Agent(graph, recursion_limit or settings.agent_recursion_limit)
+    return Agent(
+        graph, settings.agent_recursion_limit if recursion_limit is None else recursion_limit
+    )

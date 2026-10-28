@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     judge_model: str = "gpt-4o"
     embedding_model: str = "text-embedding-3-small"
     temperature: float = 0.0
-    agent_recursion_limit: int = 12  # max LangGraph steps per question
+    agent_recursion_limit: int = Field(12, ge=1)  # max LangGraph steps per question
 
     # Chunking / retrieval
     chunk_size: int = 1000

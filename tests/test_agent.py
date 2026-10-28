@@ -112,18 +112,41 @@ def test_retrieve_plus_reasoning_merged_deduped_cut_to_k(fake_embeddings, fake_c
     ]
 
 
-def test_step_limit_returns_fallback_with_partial_state(fake_embeddings, fake_chat_model_factory):
-    agent = _agent(
-        fake_embeddings,
+def test_step_limit_returns_fallback_with_partial_state(fake_chat_model_factory):
+    counter = iter(range(100))
+
+    def fn(query: str):
+        n = next(counter)
+        return "text", {"article_ids": [f"a{n}", f"b{n}"]}
+
+    tool = StructuredTool.from_function(
+        fn, name="retrieve", description="d", response_format="content_and_artifact"
+    )
+    agent, _ = _stub_agent(
         fake_chat_model_factory,
-        [_call("retrieve", "loop", str(i)) for i in range(20)],  # never answers
+        [_multi("retrieve") for _ in range(20)],  # never answers
+        [tool],
+        k=10,
         recursion_limit=5,
     )
     res = agent.run("q")
     assert res.stopped_reason == "step_limit"
     assert res.answer == STEP_LIMIT_ANSWER
+    assert res.retrieved_ids == ["a0", "b0", "a1", "b1"]
+    assert res.tools_used == [{"tool": "retrieve", "ok": True}] * 2
+
+
+def test_final_answer_on_last_allowed_step_is_completed(fake_embeddings, fake_chat_model_factory):
+    agent = _agent(
+        fake_embeddings,
+        fake_chat_model_factory,
+        [_call("retrieve", "solar", "1"), AIMessage(content="final")],
+        recursion_limit=3,
+    )
+    res = agent.run("q")
+    assert res.stopped_reason == "completed"
+    assert res.answer == "final"
     assert len(res.retrieved_ids) == 3
-    assert res.tools_used and all(t == {"tool": "retrieve", "ok": True} for t in res.tools_used)
 
 
 # ---- edge cases ----------------------------------------------------------------------------
@@ -146,9 +169,9 @@ def _stub_tool(name, ids, artifact=True):
     return StructuredTool.from_function(plain, name=name, description="d")
 
 
-def _stub_agent(factory, responses, tools, k=3, **kw):
+def _stub_agent(factory, responses, tools, k=3, recursion_limit=12, **kw):
     llm = factory(responses)
-    return Agent(build_graph(llm, tools, k=k, **kw)), llm
+    return Agent(build_graph(llm, tools, k=k, **kw), recursion_limit), llm
 
 
 def _multi(*calls):
