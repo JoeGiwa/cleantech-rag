@@ -126,12 +126,13 @@ def validate(
     items: list[ComplexQA] | list[SimpleQA], corpus_ids: Collection[str] | None = None
 ) -> dict[str, int]:
     """Return counts only (no question/answer content)."""
-    sets = Counter(frozenset(q.article_ids) for q in items)
+    sets = Counter(frozenset(q.article_ids) for q in items if q.article_ids)
     shared = [k for k, c in sets.items() if c > 1]
     result = {
         "num_queries": len(items),
         "distinct_id_sets": len(sets),
         "queries_sharing_id_sets": sum(sets[k] for k in shared),
+        "queries_without_ids": sum(not q.article_ids for q in items),
     }
     if corpus_ids is not None:
         corpus = set(corpus_ids)

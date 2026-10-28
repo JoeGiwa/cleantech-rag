@@ -66,6 +66,7 @@ def test_validate_counts():
         "num_queries": 4,
         "distinct_id_sets": 3,
         "queries_sharing_id_sets": 2,
+        "queries_without_ids": 0,
         "gold_ids_missing_from_corpus": 1,
     }
 
@@ -192,6 +193,7 @@ def test_validate_empty_and_without_corpus():
         "num_queries": 0,
         "distinct_id_sets": 0,
         "queries_sharing_id_sets": 0,
+        "queries_without_ids": 0,
     }
     assert "gold_ids_missing_from_corpus" not in validate(parse_complex_qa(TXT))
 
@@ -236,25 +238,57 @@ def _simple(urls):
     return [SimpleQA(str(i), str(i), "q", "t", "a", u) for i, u in enumerate(urls)]
 
 
-def test_map_article_ids(tmp_path, caplog):
-    from cleantech_rag.evaluation.datasets import load_url_index, map_article_ids
+@pytest.fixture
+def mapping(tmp_path):
+    from cleantech_rag.evaluation.datasets import load_url_index
 
     corpus = tmp_path / "c.csv"
     corpus.write_text(
         "Unnamed: 0,title,url\n1,t,http://a/1\n2,t,http://b/2/\n3,t,http://dup\n4,t,http://dup\n",
         encoding="utf-8",
     )
-    index = load_url_index(corpus)
-    items = _simple([" http://a/1/ ", "http://b/2", "http://dup", "http://nope"])
-    with caplog.at_level(logging.WARNING):
-        mapped, unmapped = map_article_ids(items, index)
-    assert [m.article_ids for m in mapped] == [["1"], ["2"], ["3", "4"], []]
+    return load_url_index(corpus)
+
+
+def _map(urls, index):
+    from cleantech_rag.evaluation.datasets import map_article_ids
+
+    return map_article_ids(_simple(urls), index)
+
+
+def test_map_mapped_url(mapping):
+    mapped, unmapped = _map(["http://a/1"], mapping)
+    assert mapped[0].article_ids == ["1"] and unmapped == 0
+
+
+def test_map_normalizes_whitespace_and_trailing_slash(mapping):
+    mapped, _ = _map([" http://a/1/ ", "http://b/2"], mapping)
+    assert [m.article_ids for m in mapped] == [["1"], ["2"]]
+
+
+def test_map_duplicate_url_keeps_all_ids_in_order(mapping):
+    mapped, _ = _map(["http://dup"], mapping)
+    assert mapped[0].article_ids == ["3", "4"]
+
+
+def test_map_ids_are_str(mapping):
+    mapped, _ = _map(["http://a/1", "http://dup"], mapping)
     assert all(isinstance(i, str) for m in mapped for i in m.article_ids)
-    assert unmapped == 1
-    assert "1 of 4" in caplog.text and "nope" not in caplog.text
+
+
+def test_map_unmapped_kept_empty_counted_and_warned_without_content(mapping, caplog):
+    with caplog.at_level(logging.WARNING):
+        mapped, unmapped = _map(["http://a/1", "http://nope"], mapping)
+    assert mapped[1].article_ids == [] and unmapped == 1
+    assert "1 of 2" in caplog.text and "nope" not in caplog.text
+
+
+def test_validate_excludes_empty_id_sets(mapping):
+    mapped, _ = _map(["http://a/1", "http://nope", "http://nope2", "http://dup"], mapping)
     assert validate(mapped, {"1", "2", "3"}) == {
         "num_queries": 4,
-        "distinct_id_sets": 4,
+        "distinct_id_sets": 2,
         "queries_sharing_id_sets": 0,
+        "queries_without_ids": 2,
         "gold_ids_missing_from_corpus": 1,
     }
