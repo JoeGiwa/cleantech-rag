@@ -97,3 +97,76 @@ def test_tool_returns_no_article_ids():
 @pytest.mark.parametrize("key", [""])
 def test_empty_key_disabled(key):
     assert brave_search("q", _settings(key=key)) == DISABLED_MESSAGE
+
+
+def test_missing_fields_use_defaults(monkeypatch):
+    _patch_get(monkeypatch, lambda *a, **k: FakeResp(payload={"web": {"results": [{}]}}))
+    out = brave_search("q", _settings())
+    assert "Title: N/A" in out and "URL: N/A" in out
+
+
+def test_results_truncated_to_count(monkeypatch):
+    items = [{"title": f"T{i}", "url": "u", "description": "d"} for i in range(30)]
+    _patch_get(monkeypatch, lambda *a, **k: FakeResp(payload={"web": {"results": items}}))
+    s = Settings(brave_api_key="k", brave_result_count=3, _env_file=None)
+    out = brave_search("q", s)
+    assert "[3]" in out and "[4]" not in out
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: non-dict JSON / null web / null results raise")
+@pytest.mark.parametrize(
+    "payload", [[], "str", None, {"web": None}, {"web": []}, {"web": {"results": None}}]
+)
+def test_malformed_json_shapes_do_not_raise(monkeypatch, payload):
+    _patch_get(monkeypatch, lambda *a, **k: FakeResp(payload=payload))
+    out = brave_search("q", _settings())
+    assert isinstance(out, str)
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: non-dict result items raise")
+def test_non_dict_result_items_do_not_raise(monkeypatch):
+    _patch_get(monkeypatch, lambda *a, **k: FakeResp(payload={"web": {"results": ["x", None]}}))
+    assert isinstance(brave_search("q", _settings()), str)
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: null description rendered as 'None'")
+def test_null_description_not_rendered_as_none(monkeypatch):
+    payload = {"web": {"results": [{"title": "T", "url": "u", "description": None}]}}
+    _patch_get(monkeypatch, lambda *a, **k: FakeResp(payload=payload))
+    assert "None" not in brave_search("q", _settings())
+
+
+@pytest.mark.parametrize("status", [401, 500, 503])
+def test_other_statuses(monkeypatch, status):
+    _patch_get(monkeypatch, lambda *a, **k: FakeResp(status=status))
+    assert f"HTTP {status}" in brave_search("q", _settings())
+
+
+def test_api_key_never_leaked_in_errors(monkeypatch):
+    def get(*a, **k):
+        raise requests.RequestException("token=SECRETKEY")
+
+    _patch_get(monkeypatch, get)
+    assert "SECRETKEY" not in brave_search("q", _settings(key="SECRETKEY"))
+
+
+def test_tool_invoke_success_artifact(monkeypatch):
+    payload = {"web": {"results": [{"title": "T", "url": "u", "description": "d"}]}}
+    _patch_get(monkeypatch, lambda *a, **k: FakeResp(payload=payload))
+    msg = make_web_search_tool(_settings()).invoke(
+        {"type": "tool_call", "name": "web_search", "args": {"query": "x"}, "id": "9"}
+    )
+    assert "Title: T" in msg.content
+    assert msg.artifact == {"article_ids": [], "documents": []}
+    assert msg.tool_call_id == "9"
+
+
+def test_tool_timeout_does_not_raise(monkeypatch):
+    def get(*a, **k):
+        raise requests.Timeout()
+
+    _patch_get(monkeypatch, get)
+    msg = make_web_search_tool(_settings()).invoke(
+        {"type": "tool_call", "name": "web_search", "args": {"query": "x"}, "id": "1"}
+    )
+    assert "timed out" in msg.content

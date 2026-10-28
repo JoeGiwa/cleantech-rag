@@ -61,3 +61,41 @@ def test_no_results_skips_llm(monkeypatch, fake_chat_model_factory):
     assert "No relevant articles" in msg.content
     assert msg.artifact["article_ids"] == []
     assert llm.calls == []
+
+
+def test_artifact_has_documents_and_tool_call_id(fake_embeddings, fake_chat_model_factory):
+    llm = fake_chat_model_factory([AIMessage(content="a")])
+    msg = _call(make_reasoning_tool(_store(fake_embeddings), llm, k=2))
+    assert msg.tool_call_id == "1"
+    assert len(msg.artifact["documents"]) == len(msg.artifact["article_ids"]) == 2
+
+
+def test_k_and_overfetch_forwarded(monkeypatch, fake_chat_model_factory):
+    seen = {}
+
+    def fake_retrieve(store, query, k, overfetch):
+        seen.update(query=query, k=k, overfetch=overfetch)
+        return RetrievalResult()
+
+    monkeypatch.setattr(reasoning, "retrieve_articles", fake_retrieve)
+    llm = fake_chat_model_factory([])
+    _call(make_reasoning_tool(object(), llm, k=7, overfetch=4), q="Q?")
+    assert seen == {"query": "Q?", "k": 7, "overfetch": 4}
+
+
+def test_empty_store_skips_llm(fake_embeddings, fake_chat_model_factory):
+    llm = fake_chat_model_factory([AIMessage(content="x")])
+    msg = _call(make_reasoning_tool(InMemoryVectorStore(fake_embeddings), llm))
+    assert "No relevant articles" in msg.content
+    assert msg.artifact["article_ids"] == [] and llm.calls == []
+
+
+def test_question_in_prompt_and_non_string_content(monkeypatch, fake_chat_model_factory):
+    doc = Document(page_content="CTX", metadata={"article_id": "1"})
+    monkeypatch.setattr(
+        reasoning, "retrieve_articles", lambda *a, **k: RetrievalResult(["1"], [doc])
+    )
+    llm = fake_chat_model_factory([AIMessage(content=[{"type": "text", "text": "hi"}])])
+    msg = _call(make_reasoning_tool(object(), llm), q="MYQ")
+    assert "MYQ" in llm.calls[0][0].content and "CTX" in llm.calls[0][0].content
+    assert isinstance(msg.content, str)
