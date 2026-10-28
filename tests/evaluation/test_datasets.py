@@ -228,3 +228,33 @@ def test_simple_qa_ids_stay_str_and_blank_cells(tmp_path):
     (s,) = load_simple_qa(c)
     assert s.example_id == "007" and s.question_id == "2"
     assert s.relevant_text == "" and s.article_url == ""
+
+
+def _simple(urls):
+    from cleantech_rag.evaluation.datasets import SimpleQA
+
+    return [SimpleQA(str(i), str(i), "q", "t", "a", u) for i, u in enumerate(urls)]
+
+
+def test_map_article_ids(tmp_path, caplog):
+    from cleantech_rag.evaluation.datasets import load_url_index, map_article_ids
+
+    corpus = tmp_path / "c.csv"
+    corpus.write_text(
+        "Unnamed: 0,title,url\n1,t,http://a/1\n2,t,http://b/2/\n3,t,http://dup\n4,t,http://dup\n",
+        encoding="utf-8",
+    )
+    index = load_url_index(corpus)
+    items = _simple([" http://a/1/ ", "http://b/2", "http://dup", "http://nope"])
+    with caplog.at_level(logging.WARNING):
+        mapped, unmapped = map_article_ids(items, index)
+    assert [m.article_ids for m in mapped] == [["1"], ["2"], ["3", "4"], []]
+    assert all(isinstance(i, str) for m in mapped for i in m.article_ids)
+    assert unmapped == 1
+    assert "1 of 4" in caplog.text and "nope" not in caplog.text
+    assert validate(mapped, {"1", "2", "3"}) == {
+        "num_queries": 4,
+        "distinct_id_sets": 4,
+        "queries_sharing_id_sets": 0,
+        "gold_ids_missing_from_corpus": 1,
+    }

@@ -9,7 +9,7 @@ import logging
 import re
 from collections import Counter
 from collections.abc import Collection
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pandas as pd
@@ -39,6 +39,7 @@ class SimpleQA:
     relevant_text: str
     answer: str
     article_url: str
+    article_ids: list[str] = field(default_factory=list)
 
 
 def parse_complex_qa(text: str, *, strict: bool = False) -> list[ComplexQA]:
@@ -88,7 +89,42 @@ def load_simple_qa(path: str | Path) -> list[SimpleQA]:
     ]
 
 
-def validate(items: list[ComplexQA], corpus_ids: Collection[str] | None = None) -> dict[str, int]:
+def _norm_url(url: str) -> str:
+    return url.strip().rstrip("/")
+
+
+def load_url_index(corpus_path: str | Path) -> dict[str, list[str]]:
+    """Map normalized corpus ``url`` -> article IDs (str, corpus order). Loads two columns only."""
+    df = pd.read_csv(corpus_path, usecols=["url", "Unnamed: 0"], dtype=str, keep_default_na=False)
+    index: dict[str, list[str]] = {}
+    for url, aid in zip(df["url"], df["Unnamed: 0"], strict=True):
+        ids = index.setdefault(_norm_url(url), [])
+        if aid not in ids:
+            ids.append(aid)
+    return index
+
+
+def map_article_ids(
+    items: list[SimpleQA], url_index: dict[str, list[str]]
+) -> tuple[list[SimpleQA], int]:
+    """Fill ``article_ids`` from ``article_url``. Returns (items, unmapped_count).
+
+    Unmapped rows are kept with empty ``article_ids`` (reversible: callers can filter).
+    """
+    out: list[SimpleQA] = []
+    unmapped = 0
+    for q in items:
+        ids = url_index.get(_norm_url(q.article_url), [])
+        unmapped += not ids
+        out.append(replace(q, article_ids=list(ids)))
+    if unmapped:
+        logger.warning("%d of %d article URLs not found in corpus", unmapped, len(items))
+    return out, unmapped
+
+
+def validate(
+    items: list[ComplexQA] | list[SimpleQA], corpus_ids: Collection[str] | None = None
+) -> dict[str, int]:
     """Return counts only (no question/answer content)."""
     sets = Counter(frozenset(q.article_ids) for q in items)
     shared = [k for k, c in sets.items() if c > 1]
