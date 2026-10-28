@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import requests
 from langchain_core.tools import BaseTool, StructuredTool
 
 from cleantech_rag.config import Settings, get_settings
+
+logger = logging.getLogger(__name__)
 
 DISABLED_MESSAGE = "Web search disabled: BRAVE_API_KEY is not set."
 
@@ -23,10 +26,14 @@ def _format_results(results: list[dict[str, Any]]) -> str:
     return "\n\n".join(blocks)
 
 
+def _has_api_key(settings: Settings) -> bool:
+    return settings.brave_api_key is not None and bool(settings.brave_api_key.get_secret_value())
+
+
 def brave_search(query: str, settings: Settings | None = None) -> str:
     """Run a Brave web search and return formatted text or a clean error/disabled message."""
     settings = settings or get_settings()
-    if settings.brave_api_key is None or not settings.brave_api_key.get_secret_value():
+    if not _has_api_key(settings):
         return DISABLED_MESSAGE
     headers = {
         "Accept": "application/json",
@@ -62,6 +69,9 @@ def brave_search(query: str, settings: Settings | None = None) -> str:
 
 def make_web_search_tool(settings: Settings | None = None) -> BaseTool:
     """Build the `web_search` tool. Returns (content, {"article_ids": [], "documents": []})."""
+    settings = settings or get_settings()
+    if not _has_api_key(settings):
+        logger.warning("BRAVE_API_KEY is not set; web_search tool is disabled")
 
     def web_search(query: str) -> tuple[str, dict[str, Any]]:
         return brave_search(query, settings), {"article_ids": [], "documents": []}

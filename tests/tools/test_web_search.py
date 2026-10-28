@@ -175,3 +175,17 @@ def test_tool_timeout_does_not_raise(monkeypatch):
         {"type": "tool_call", "name": "web_search", "args": {"query": "x"}, "id": "1"}
     )
     assert "timed out" in msg.content
+
+
+@pytest.mark.parametrize("key", [None, ""])
+def test_build_without_key_logs_one_warning(caplog, key):
+    with caplog.at_level("WARNING", logger=web_search.__name__):
+        make_web_search_tool(_settings(key=key))
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1 and "BRAVE_API_KEY" in warnings[0].getMessage()
+
+
+def test_build_with_key_logs_nothing(caplog):
+    with caplog.at_level("WARNING", logger=web_search.__name__):
+        make_web_search_tool(_settings())
+    assert caplog.records == []

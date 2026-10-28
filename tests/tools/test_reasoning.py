@@ -95,7 +95,12 @@ def test_question_in_prompt_and_non_string_content(monkeypatch, fake_chat_model_
     monkeypatch.setattr(
         reasoning, "retrieve_articles", lambda *a, **k: RetrievalResult(["1"], [doc])
     )
-    llm = fake_chat_model_factory([AIMessage(content=[{"type": "text", "text": "hi"}])])
+    content = [
+        {"type": "text", "text": "Step 1. "},
+        {"type": "tool_use", "id": "t", "name": "x", "input": {}},
+        "Step 2.",
+    ]
+    llm = fake_chat_model_factory([AIMessage(content=content)])
     msg = _call(make_reasoning_tool(object(), llm), q="MYQ")
     assert "MYQ" in llm.calls[0][0].content and "CTX" in llm.calls[0][0].content
-    assert isinstance(msg.content, str)
+    assert msg.content == "Step 1. Step 2."
