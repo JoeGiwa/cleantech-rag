@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
+import os
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -36,6 +38,8 @@ from typing import Any, Protocol
 
 from cleantech_rag.evaluation import metrics
 from cleantech_rag.evaluation.judge import JudgeResult, aggregate_judge_results
+
+logger = logging.getLogger(__name__)
 
 RETRIEVAL_METRICS = (
     "precision_at_k",
@@ -141,6 +145,10 @@ class ResumeMismatchError(ValueError):
     """The run log being resumed does not belong to this dataset/config."""
 
 
+class CorruptLogError(ResumeMismatchError):
+    """A run-log line (other than an interrupted final write) cannot be parsed."""
+
+
 class RunLog:
     """Append-only JSONL log of per-query records with a config header on the first line."""
 
@@ -160,22 +168,61 @@ class RunLog:
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(obj) + "\n")
             fh.flush()
+            os.fsync(fh.fileno())
+
+    def _corrupt(self, lineno: int, why: object) -> CorruptLogError:
+        return CorruptLogError(f"{self.path}: line {lineno} is not a valid run-log record ({why}).")
 
     def _load(self) -> None:
         if not self.path.exists():
             raise FileNotFoundError(f"resume file {self.path} not found.")
-        lines = [ln for ln in self.path.read_text(encoding="utf-8").splitlines() if ln.strip()]
-        first = json.loads(lines[0]) if lines else {}
-        if first.get("type") != "header":
+        raw = self.path.read_bytes()
+        # (line number, byte offset where the line starts, text) for every non-blank line
+        lines: list[tuple[int, int, str]] = []
+        offset = 0
+        for n, chunk in enumerate(raw.split(b"\n"), start=1):
+            if chunk.strip():
+                lines.append((n, offset, chunk.decode("utf-8", errors="replace")))
+            offset += len(chunk) + 1
+        if not lines:
+            raise ResumeMismatchError(f"{self.path} is empty; not a run log.")
+        try:
+            first = json.loads(lines[0][2])
+        except json.JSONDecodeError as exc:
+            raise self._corrupt(lines[0][0], exc) from exc
+        if not isinstance(first, dict) or first.get("type") != "header":
             raise ResumeMismatchError(f"{self.path} has no header record; not a run log.")
         if first.get("config") != self.header:
             raise ResumeMismatchError(
                 f"{self.path} was written with a different config "
                 f"({first.get('config')} != {self.header})."
             )
-        for ln in lines[1:]:
-            rec = QueryRecord.from_json(json.loads(ln))
+        for pos, (lineno, start, text) in enumerate(lines[1:], start=1):
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError as exc:
+                if pos == len(lines) - 1:  # interrupted final write: drop the partial line
+                    logger.warning(
+                        "%s: dropping truncated final line %d (interrupted write)",
+                        self.path,
+                        lineno,
+                    )
+                    with self.path.open("r+b") as fh:
+                        fh.truncate(start)
+                    break
+                raise self._corrupt(lineno, exc) from exc
+            try:
+                rec = QueryRecord.from_json(data)
+            except (TypeError, KeyError, ValueError, AttributeError) as exc:
+                raise self._corrupt(lineno, f"{type(exc).__name__}: {exc}") from exc
             self._latest[rec.index] = rec  # last row per question wins
+        # A complete last line may still lack its newline; never glue the next row onto it.
+        with self.path.open("rb+") as fh:
+            fh.seek(0, os.SEEK_END)
+            if fh.tell() > 0:
+                fh.seek(-1, os.SEEK_END)
+                if fh.read(1) != b"\n":
+                    fh.write(b"\n")
 
     def completed(self, index: int, question: str) -> bool:
         """True if this question finished without error. A different question text is refused."""

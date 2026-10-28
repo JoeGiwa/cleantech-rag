@@ -664,3 +664,48 @@ def test_evaluate_resume_missing_file_fails(tmp_path, monkeypatch):
     asked = _eval_setup(tmp_path, monkeypatch)
     res = _eval_invoke(tmp_path, "--no-judge", "--resume", str(tmp_path / "nope.jsonl"))
     assert res.exit_code != 0 and asked == []
+
+
+def test_evaluate_resume_corrupt_log_clean_error(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    assert _eval_invoke(tmp_path, "--no-judge", "--max-queries", "2").exit_code == 0
+    log = next((tmp_path / "out").glob("run_*.jsonl"))
+    log.write_text(log.read_text() + '{"type": "row", "bogus": 1}\n{"type": "row", "bogus": 1}\n')
+    asked.clear()
+    res = _eval_invoke(tmp_path, "--no-judge", "--resume", str(log))
+    assert res.exit_code == 1 and asked == []
+    assert "line 4" in res.output
+    assert not isinstance(res.exception, (TypeError, KeyError))
+
+
+def test_evaluate_resume_truncated_tail_and_remaining_count(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    assert _eval_invoke(tmp_path, "--no-judge", "--max-queries", "2").exit_code == 0
+    log = next((tmp_path / "out").glob("run_*.jsonl"))
+    with log.open("a") as fh:
+        fh.write('{"type": "row", "ind')
+    asked.clear()
+    res = _eval_invoke(tmp_path, "--no-judge", "--max-queries", "4", "--resume", str(log))
+    assert res.exit_code == 0, res.output
+    assert "2 of 4 questions remaining" in res.output
+    assert asked == ["Question 3?", "Question 4?"]
+
+
+def test_evaluate_interrupt_prints_resume_hint(tmp_path, monkeypatch):
+    _eval_setup(tmp_path, monkeypatch)
+
+    class Boom:
+        n = 0
+
+        def run(self, q, thread_id=None):
+            self.n += 1
+            if self.n == 2:
+                raise KeyboardInterrupt
+            return SimpleNamespace(answer="a", retrieved_ids=["1"], tools_used=[])
+
+    monkeypatch.setattr(cli, "_setup_agent", lambda settings: Boom())
+    res = _eval_invoke(tmp_path, "--no-judge")
+    assert res.exit_code != 0
+    assert "--resume" in res.output and ".jsonl" in res.output
+    log = next((tmp_path / "out").glob("run_*.jsonl"))
+    assert len(log.read_text().splitlines()) == 2  # header + 1 row

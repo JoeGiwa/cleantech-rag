@@ -8,6 +8,7 @@ import pytest
 from cleantech_rag.evaluation.judge import CRITERIA, JudgeResult
 from cleantech_rag.evaluation.runner import (
     CSV_COLUMNS,
+    CorruptLogError,
     EvalItem,
     ResumeMismatchError,
     RunLog,
@@ -397,3 +398,81 @@ def test_none_answer_becomes_empty_string():
 
     recs = evaluate_items([EvalItem("q", "r", ["1"])], A(), None, encoder=fake_encoder)
     assert recs[0].answer == "" and recs[0].error is None
+
+
+def _two_row_log(tmp_path):
+    path = tmp_path / "run.jsonl"
+    evaluate_items(
+        LOG_ITEMS[:2],
+        FakeAgent(LOG_PLAN),
+        None,
+        encoder=fake_encoder,
+        log=RunLog(path, HEADER),
+    )
+    return path
+
+
+def test_resume_truncated_final_line_is_dropped(tmp_path, caplog):
+    path = _two_row_log(tmp_path)
+    with path.open("a") as fh:
+        fh.write('{"type": "row", "index": 2, "ques')  # crash mid-write, no newline
+    agent = FakeAgent(LOG_PLAN)
+    recs = evaluate_items(
+        LOG_ITEMS,
+        agent,
+        None,
+        encoder=fake_encoder,
+        log=RunLog(path, HEADER, resume=True),
+    )
+    assert agent.calls == ["q2", "q3"]
+    assert [r.index for r in recs] == [0, 1, 2, 3]
+    assert "truncated" in caplog.text
+    assert [r["index"] for r in _rows(path)] == [0, 1, 2, 3]  # every line parses
+
+
+def test_resume_complete_last_line_without_newline_not_glued(tmp_path):
+    path = _two_row_log(tmp_path)
+    path.write_text(path.read_text().rstrip("\n"))
+    rec = evaluate_items([LOG_ITEMS[2]], FakeAgent(LOG_PLAN), None, encoder=fake_encoder)[0]
+    rec.index = 2
+    RunLog(path, HEADER, resume=True).append(rec)
+    assert [r["index"] for r in _rows(path)] == [0, 1, 2]
+
+
+def test_resume_corrupt_middle_line_names_line_number(tmp_path):
+    path = _two_row_log(tmp_path)
+    lines = path.read_text().splitlines()
+    lines[1] = "{not json"
+    path.write_text("\n".join(lines) + "\n")
+    with pytest.raises(CorruptLogError, match="line 2"):
+        RunLog(path, HEADER, resume=True)
+
+
+def test_resume_non_json_first_line(tmp_path):
+    path = tmp_path / "run.jsonl"
+    path.write_text("garbage\n")
+    with pytest.raises(CorruptLogError, match="line 1"):
+        RunLog(path, HEADER, resume=True)
+
+
+@pytest.mark.parametrize("row", ['{"type": "row", "bogus": 1}', '{"type": "row"}', "[1, 2]"])
+def test_resume_row_with_bad_keys_is_corrupt_error(tmp_path, row):
+    path = _two_row_log(tmp_path)
+    with path.open("a") as fh:
+        fh.write(row + "\n")
+        fh.write(json.dumps(_rows(path)[0]) + "\n")  # keep the bad row off the final line
+    with pytest.raises(CorruptLogError, match="line 4"):
+        RunLog(path, HEADER, resume=True)
+
+
+def test_summary_identical_after_reload(tmp_path):
+    path = tmp_path / "run.jsonl"
+    mem = evaluate_items(
+        ITEMS,
+        FakeAgent(PLAN),
+        FakeJudge(),
+        encoder=fake_encoder,
+        log=RunLog(path, HEADER),
+    )
+    reloaded = RunLog(path, HEADER, resume=True).records()
+    assert summarize(mem, {}, True) == summarize(reloaded, {}, True)

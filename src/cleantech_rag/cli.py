@@ -244,11 +244,27 @@ def evaluate(
     except (ResumeMismatchError, FileNotFoundError, FileExistsError) as exc:
         raise _fail(str(exc)) from exc
 
+    if resume is not None:
+        try:
+            remaining = sum(not log.completed(i, q.question) for i, q in enumerate(items))
+        except ResumeMismatchError as exc:
+            raise _fail(str(exc)) from exc
+        typer.echo(f"Resuming {log_path}: {remaining} of {len(items)} questions remaining.")
     typer.echo(f"Evaluating {len(items)} {dataset} queries (log: {log_path})...")
     try:
         records = evaluate_items(items, agent, judge, k=settings.top_k, log=log)
     except ResumeMismatchError as exc:
         raise _fail(str(exc)) from exc
+    except BaseException as exc:  # Ctrl-C or a fatal (e.g. judge auth) error
+        typer.secho(
+            f"Run interrupted ({type(exc).__name__}). Completed rows are saved; "
+            f"continue with: --resume {log_path}",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        if isinstance(exc, KeyboardInterrupt):
+            raise typer.Exit(130) from exc
+        raise _fail(f"{type(exc).__name__}: {exc}") from exc
     config = {
         **config,
         "n_queries_selected": len(items),
