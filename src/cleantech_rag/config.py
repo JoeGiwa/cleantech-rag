@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     chunk_size: int = 1000
     chunk_overlap: int = 200
     top_k: int = 5
+    retrieval_overfetch: int = 4  # chunks fetched per wanted article
 
     # Paths
     raw_data_dir: Path = Path("data/raw")
