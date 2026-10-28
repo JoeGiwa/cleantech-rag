@@ -22,7 +22,7 @@ REASONING_PROMPT = (
 )
 
 
-def _message_text(content: str | list[Any]) -> str:
+def message_text(content: str | list[Any]) -> str:
     """Join the text parts of a chat message's content (str or list of content blocks)."""
     if isinstance(content, str):
         return content
@@ -48,7 +48,7 @@ def make_reasoning_tool(
         prompt = REASONING_PROMPT.format(
             context=format_context(result.documents), question=question
         )
-        return _message_text(llm.invoke(prompt).content), artifact
+        return message_text(llm.invoke(prompt).content), artifact
 
     return StructuredTool.from_function(
         func=reasoning_chain,

@@ -20,7 +20,7 @@ from langgraph.prebuilt import ToolNode
 from typing_extensions import TypedDict
 
 from cleantech_rag.config import Settings, get_settings
-from cleantech_rag.tools.reasoning import _message_text, make_reasoning_tool
+from cleantech_rag.tools.reasoning import make_reasoning_tool, message_text
 from cleantech_rag.tools.retriever import make_retriever_tool
 from cleantech_rag.tools.web_search import make_web_search_tool
 
@@ -70,7 +70,7 @@ def build_graph(
 ):
     """Compile the agent/tools loop. ``llm`` must support ``bind_tools``."""
     llm_with_tools = llm.bind_tools(tools)
-    tool_node = ToolNode(tools)
+    tool_node = ToolNode(tools, handle_tool_errors=True)
 
     def agent_node(state: AgentState) -> dict[str, Any]:
         reply = llm_with_tools.invoke([SystemMessage(content=SYSTEM_PROMPT), *state["messages"]])
@@ -116,7 +116,7 @@ class Agent:
         for m in messages:
             if isinstance(m, AIMessage):
                 tools_used.extend(c["name"] for c in m.tool_calls)
-        answer = _message_text(messages[-1].content) if messages else ""
+        answer = message_text(messages[-1].content) if messages else ""
         return AgentResult(answer, list(final["retrieved_ids"]), tools_used)
 
 

@@ -210,11 +210,6 @@ def test_numeric_artifact_ids_become_str(fake_chat_model_factory):
     assert agent.run("q").retrieved_ids == ["7", "8"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="agent.py build_graph: ToolNode(tools) uses default error handling, so an exception "
-    "raised inside a tool (e.g. embedding/LLM failure in retrieve) aborts the whole run",
-)
 def test_raising_tool_is_reported_to_model_not_crash(fake_chat_model_factory):
     def boom(query: str) -> str:
         raise ValueError("kaboom")
