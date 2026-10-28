@@ -567,3 +567,76 @@ def test_newline_terminated_unparsable_final_line_is_corrupt(tmp_path):
     with pytest.raises(CorruptLogError, match="line 4"):
         RunLog(path, HEADER, resume=True)
     assert path.stat().st_size == size  # nothing was cut
+
+
+def test_judge_attempts_capped_at_two_across_resumes(tmp_path):
+    path = tmp_path / "run.jsonl"
+    items = LOG_ITEMS[:2]
+    failing = CountingJudge(fail_on={"q1"})
+
+    def go(judge, agent=None):
+        agent = agent or FakeAgent(LOG_PLAN)
+        recs = evaluate_items(
+            items,
+            agent,
+            judge,
+            encoder=fake_encoder,
+            log=RunLog(path, HEADER, resume=path.exists()),
+        )
+        return agent, recs
+
+    agent, recs = go(failing)  # 1st failure
+    assert recs[1].judge_attempts == 1 and agent.calls == ["q0", "q1"]
+    agent, recs = go(failing)  # re-judged on resume, fails again -> permanent
+    assert agent.calls == [] and [q for q, _ in failing.seen] == ["q0", "q1", "q1"]
+    assert recs[1].judge_attempts == 2
+    s = summarize(recs, {}, True)
+    assert s["judge"]["n_failed"] == 1 and s["judge"]["n_judge_failed_permanent"] == 1
+    assert s["judge"]["n_scored"] == 1 and s["judge"]["n_pending"] == 0
+    healthy = CountingJudge()
+    agent, recs = go(healthy)  # third resume: not judged, agent not called
+    assert agent.calls == [] and healthy.seen == []
+    assert RunLog(path, HEADER, resume=True).lookup(1, "q1").judge_attempts == 2
+    assert summarize(recs, {}, True) == s
+
+
+def test_first_failure_counts_one_and_is_not_permanent(tmp_path):
+    path = tmp_path / "run.jsonl"
+    recs = evaluate_items(
+        LOG_ITEMS[:2],
+        FakeAgent(LOG_PLAN),
+        FakeJudge(fail_on={"q0"}),
+        encoder=fake_encoder,
+        log=RunLog(path, HEADER),
+    )
+    s = summarize(recs, {}, True)
+    assert s["judge"]["n_failed"] == 1 and s["judge"]["n_judge_failed_permanent"] == 0
+
+
+def test_pending_interrupted_row_is_not_an_attempt(tmp_path):
+    path = tmp_path / "run.jsonl"
+
+    class Boom:
+        def evaluate(self, *a):
+            raise RuntimeError("auth")
+
+    with pytest.raises(RuntimeError):
+        evaluate_items(
+            LOG_ITEMS[:1],
+            FakeAgent(LOG_PLAN),
+            Boom(),
+            encoder=fake_encoder,
+            log=RunLog(path, HEADER),
+        )
+    assert RunLog(path, HEADER, resume=True).lookup(0, "q0").judge_attempts == 0
+
+
+def test_old_log_without_attempts_field_loads(tmp_path):
+    path = _two_row_log(tmp_path)
+    lines = path.read_text().splitlines()
+    rows = [json.loads(ln) for ln in lines[1:]]
+    for r in rows:
+        r.pop("judge_attempts", None)
+        r.pop("judge_pending", None)
+    path.write_text(lines[0] + "\n" + "".join(json.dumps(r) + "\n" for r in rows))
+    assert RunLog(path, HEADER, resume=True).lookup(0, "q0").judge_attempts == 0

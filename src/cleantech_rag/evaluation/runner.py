@@ -41,6 +41,9 @@ from cleantech_rag.evaluation.judge import JudgeResult, aggregate_judge_results
 
 logger = logging.getLogger(__name__)
 
+# A question whose judge call failed this many times (counted across resumes) is never re-judged.
+MAX_JUDGE_ATTEMPTS = 2
+
 RETRIEVAL_METRICS = (
     "precision_at_k",
     "precision_at_k_retrieved",
@@ -97,6 +100,9 @@ class QueryRecord:
     # True on the row saved after the agent call but before judging; superseded (latest wins)
     # by the row written once the judge finishes.
     judge_pending: bool = False
+    # Real judge failures so far (carried forward across resumes; a pending row interrupted by a
+    # crash or Ctrl-C is not an attempt). Absent in older logs, which load as 0.
+    judge_attempts: int = 0
     error: str | None = None
 
     def to_json(self) -> dict[str, Any]:
@@ -245,7 +251,9 @@ class RunLog:
         rec = self.lookup(index, question)
         if rec is None or rec.error is not None:
             return False
-        return not judge_enabled or (rec.judge is not None and rec.judge.ok)
+        if not judge_enabled:
+            return True
+        return rec.judge is not None and (rec.judge.ok or rec.judge_attempts >= MAX_JUDGE_ATTEMPTS)
 
     def append(self, rec: QueryRecord) -> None:
         self._write(rec.to_json())
@@ -281,6 +289,7 @@ def evaluate_items(
             if saved is not None and saved.error is None and judge is not None:
                 saved.judge = judge.evaluate(item.question, saved.answer, item.reference)
                 saved.judge_pending = False
+                saved.judge_attempts += not saved.judge.ok
                 log.append(saved)
                 continue
         rec = QueryRecord(index=i, question=item.question, gold_ids=list(item.gold_ids))
@@ -318,6 +327,7 @@ def evaluate_items(
                 log.append(rec)
             rec.judge = judge.evaluate(item.question, rec.answer, item.reference)
             rec.judge_pending = False
+            rec.judge_attempts += not rec.judge.ok
         if log is not None:
             log.append(rec)
     return log.records() if log is not None else records
@@ -348,6 +358,13 @@ def summarize(
             {
                 **aggregate_judge_results([r.judge for r in ok if r.judge is not None]),
                 "n_pending": sum(r.judge is None for r in ok),
+                # subset of n_failed: judge failed MAX_JUDGE_ATTEMPTS times, never re-judged
+                "n_judge_failed_permanent": sum(
+                    r.judge is not None
+                    and not r.judge.ok
+                    and r.judge_attempts >= MAX_JUDGE_ATTEMPTS
+                    for r in ok
+                ),
             }
             if judge_enabled
             else None
