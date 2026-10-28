@@ -11,7 +11,13 @@ from langchain_core.documents import Document
 
 from cleantech_rag import vectorstore
 from cleantech_rag.config import Settings
-from cleantech_rag.vectorstore import build_index, estimate_cost, estimate_tokens, load_index
+from cleantech_rag.vectorstore import (
+    build_index,
+    estimate_cost,
+    estimate_tokens,
+    index_exists,
+    load_index,
+)
 
 _REQ = httpx.Request("POST", "https://api.openai.com/v1/embeddings")
 
