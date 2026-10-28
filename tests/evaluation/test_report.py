@@ -102,3 +102,93 @@ def test_report_cli(tmp_path):
 def test_report_cli_missing_file(tmp_path):
     res = CliRunner().invoke(cli.app, ["report", str(tmp_path / "nope.json")])
     assert res.exit_code == 1
+
+
+def test_empty_summary_does_not_crash(tmp_path):
+    out = tmp_path / "out"
+    paths = report.generate_report(_write(tmp_path, {}), out)
+    assert all(p.exists() for p in paths)
+    md = (out / "summary_x.md").read_text(encoding="utf-8")
+    assert "Judge was not run." in md
+    assert "n/a" in md
+
+
+def test_partial_summary_missing_keys(tmp_path):
+    summary = {"config": {"k": 5}, "retrieval": {"all_queries": {"n": 2, "mrr": 0.5}}}
+    out = tmp_path / "out"
+    paths = report.generate_report(_write(tmp_path, summary), out)
+    assert any(p.name.endswith("_retrieval.png") for p in paths)
+    md = (out / "summary_x.md").read_text(encoding="utf-8")
+    assert "| MRR | 0.500 | n/a |" in md
+
+
+def test_partial_judge_missing_criteria(tmp_path):
+    out = tmp_path / "out"
+    report.generate_report(_write(tmp_path, {"judge": {"overall": 4.0}}), out)
+    md = (out / "summary_x.md").read_text(encoding="utf-8")
+    assert "| Overall | 4.00 |" in md
+    assert "| Relevance | n/a |" in md
+    assert (out / "summary_x_judge.png").read_bytes().startswith(PNG_MAGIC)
+
+
+def test_all_none_values(tmp_path):
+    summary = synthetic_summary()
+    for view in summary["retrieval"].values():
+        for key in view:
+            if key != "n":
+                view[key] = None
+    summary["response"] = dict.fromkeys(summary["response"])
+    out = tmp_path / "out"
+    paths = report.generate_report(_write(tmp_path, summary), out)
+    assert all(p.exists() for p in paths)
+
+
+def test_nan_values_do_not_crash(tmp_path):
+    summary = synthetic_summary()
+    summary["response"]["bleu"] = float("nan")
+    out = tmp_path / "out"
+    paths = report.generate_report(_write(tmp_path, summary), out)
+    assert all(p.exists() for p in paths)
+
+
+def test_output_dir_created_nested(tmp_path):
+    out = tmp_path / "a" / "b" / "c"
+    report.generate_report(_write(tmp_path, synthetic_summary()), out)
+    assert (out / "summary_x.md").exists()
+
+
+def test_missing_file_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        report.generate_report(tmp_path / "nope.json", tmp_path / "out")
+
+
+def test_malformed_json_raises(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        report.generate_report(path, tmp_path / "out")
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: report CLI shows raw traceback on bad summary JSON")
+def test_report_cli_malformed_json_clean_error(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text("{not json", encoding="utf-8")
+    res = CliRunner().invoke(cli.app, ["report", str(path)])
+    assert res.exit_code == 1
+    assert isinstance(res.exception, SystemExit), repr(res.exception)
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: report CLI shows raw traceback on bad summary JSON")
+def test_report_cli_non_object_json(tmp_path):
+    path = tmp_path / "list.json"
+    path.write_text("[1, 2]", encoding="utf-8")
+    res = CliRunner().invoke(cli.app, ["report", str(path)])
+    assert res.exit_code == 1
+    assert isinstance(res.exception, SystemExit), repr(res.exception)
+
+
+def test_report_cli_defaults_next_to_json(tmp_path):
+    path = _write(tmp_path, synthetic_summary())
+    res = CliRunner().invoke(cli.app, ["report", str(path)])
+    assert res.exit_code == 0, res.output
+    assert (tmp_path / "summary_x_response.png").exists()
