@@ -1,9 +1,10 @@
 """LangGraph agent: a hand-written agent <-> tools loop that tracks retrieved article IDs.
 
-Graph: START -> agent -> (tool calls? -> tools -> agent | else END). State is per invocation:
-``retrieved_ids`` starts empty on every ``run`` and is filled only from this run's tool
-artifacts, so IDs cannot leak between queries. ``messages`` persist per ``thread_id`` through an
-``InMemorySaver`` checkpointer (conversation memory); ``retrieved_ids`` is overwritten each run.
+Graph: START -> agent -> (tool calls? -> tools -> agent | else END). ``messages`` persist
+per ``thread_id`` through a checkpointer (conversation memory). ``retrieved_ids`` is per run: every
+``run`` passes ``[]`` (overwriting whatever the checkpoint holds) and fills it only from this
+run's tool artifacts, so IDs cannot leak between queries. Per-run result fields are derived only
+from this run's own messages. A step-limit stop is repaired so no unanswered tool call is saved.
 """
 
 from __future__ import annotations
@@ -85,7 +86,7 @@ def build_graph(
     """Compile the agent/tools loop. ``llm`` must support ``bind_tools``.
 
     Conversation history is kept per ``thread_id`` by ``checkpointer`` (default: in-memory) and
-    trimmed to the last ``max_history`` turns.
+    trimmed to the ``max_history`` previous turns plus the current one.
     """
     llm_with_tools = llm.bind_tools(tools)
     tool_node = ToolNode(tools, handle_tool_errors=True)
@@ -119,7 +120,9 @@ def build_graph(
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", route, {"tools": "tools", END: END})
     graph.add_edge("tools", "agent")
-    return graph.compile(checkpointer=checkpointer or make_checkpointer())
+    return graph.compile(
+        checkpointer=checkpointer if checkpointer is not None else make_checkpointer()
+    )
 
 
 class Agent:
@@ -154,13 +157,16 @@ class Agent:
             last = state["messages"][-1] if state["messages"] else None
             if not (isinstance(last, AIMessage) and not last.tool_calls):
                 stopped = "step_limit"
+                if not ephemeral:
+                    self._close_interrupted_turn(thread_id)
         finally:
-            if ephemeral:  # throwaway thread: don't let checkpoints pile up across runs
-                self._graph.checkpointer.delete_thread(thread_id)
+            saver = self._saver()
+            if ephemeral and saver is not None:  # don't let throwaway checkpoints pile up
+                saver.delete_thread(thread_id)
         # Per-run fields come only from this turn's messages (from its own human message on).
         all_messages = state["messages"]
-        start = next((i for i, m in enumerate(all_messages) if m.id == turn_id), 0)
-        messages = all_messages[start:]
+        start = next((i for i, m in enumerate(all_messages) if m.id == turn_id), None)
+        messages = [] if start is None else all_messages[start:]  # fail safe: never leak history
         tools_used = [
             {"tool": m.name, "ok": m.status != "error"}
             for m in messages
@@ -172,6 +178,31 @@ class Agent:
             answer = message_text(messages[-1].content) if messages else ""
         return AgentResult(answer, list(state["retrieved_ids"]), tools_used, stopped)
 
+    def _saver(self) -> Any:
+        saver = getattr(self._graph, "checkpointer", None)
+        return saver if hasattr(saver, "delete_thread") else None
+
+    def _close_interrupted_turn(self, thread_id: str) -> None:
+        """After a step-limit stop, give every unanswered tool call an error ToolMessage and end
+        the turn with the fallback answer, so the saved thread is valid input for the next turn."""
+        config = {"configurable": {"thread_id": thread_id}}
+        messages = list(self._graph.get_state(config).values.get("messages", []))
+        answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
+        patch: list[BaseMessage] = [
+            ToolMessage(
+                content="Error: step limit reached before this tool ran.",
+                tool_call_id=call["id"],
+                name=call["name"],
+                status="error",
+            )
+            for m in messages
+            if isinstance(m, AIMessage)
+            for call in m.tool_calls
+            if call["id"] not in answered
+        ]
+        patch.append(AIMessage(content=STEP_LIMIT_ANSWER))
+        self._graph.update_state(config, {"messages": patch}, as_node="agent")
+
     def history(self, thread_id: str) -> list[BaseMessage]:
         """Live messages of a thread (empty for an unknown thread)."""
         config = {"configurable": {"thread_id": thread_id}}
@@ -179,7 +210,10 @@ class Agent:
 
     def clear(self, thread_id: str) -> None:
         """Forget a thread's history."""
-        self._graph.checkpointer.delete_thread(thread_id)
+        saver = self._saver()
+        if saver is None:
+            raise RuntimeError("Agent has no checkpointer; there is no memory to clear.")
+        saver.delete_thread(thread_id)
 
     def summary(self, thread_id: str) -> str:
         """LLM summary of the thread's current history."""

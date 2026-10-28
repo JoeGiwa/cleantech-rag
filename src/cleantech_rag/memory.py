@@ -29,12 +29,15 @@ def make_checkpointer() -> InMemorySaver:
 
 
 def messages_to_trim(messages: list[AnyMessage], max_history: int) -> list[RemoveMessage]:
-    """RemoveMessage ops dropping every turn but the last ``max_history`` (a turn starts at a
-    human message and includes its tool calls and answer). Cuts only on turn boundaries."""
+    """RemoveMessage ops keeping the current (last) turn plus the ``max_history`` turns before it.
+
+    A turn starts at a human message and includes its tool calls and answer; cuts happen only on
+    turn boundaries. ``max_history=0`` keeps just the current turn."""
     starts = [i for i, m in enumerate(messages) if isinstance(m, HumanMessage)]
-    if max_history < 1 or len(starts) <= max_history:
+    keep = max(max_history, 0) + 1
+    if len(starts) <= keep:
         return []
-    return [RemoveMessage(id=m.id) for m in messages[: starts[-max_history]] if m.id]
+    return [RemoveMessage(id=m.id) for m in messages[: starts[-keep]] if m.id]
 
 
 def format_conversation(messages: list[BaseMessage]) -> str:
