@@ -13,7 +13,7 @@ from langchain_core.documents import Document
 from langchain_core.tools import BaseTool, StructuredTool
 from langchain_core.vectorstores import VectorStore
 
-# Over-fetch chunks so that collapsing to articles can still fill k articles.
+# Default chunks fetched per wanted article (overridable via Settings.retrieval_overfetch).
 OVERFETCH_FACTOR = 4
 
 
@@ -21,28 +21,44 @@ OVERFETCH_FACTOR = 4
 class RetrievalResult:
     """Ranked, article-level result of one retrieval call."""
 
-    article_ids: list[Any] = field(default_factory=list)
+    article_ids: list[str] = field(default_factory=list)
     documents: list[Document] = field(default_factory=list)  # best chunk per article, ranked
 
 
-def retrieve_articles(store: VectorStore, query: str, k: int = 5) -> RetrievalResult:
-    """Search chunks, collapse to articles at each article's best rank, return top-k articles."""
-    if k <= 0:
-        return RetrievalResult()
-    chunks = store.similarity_search(query, k=k * OVERFETCH_FACTOR)
-    seen: set[Any] = set()
-    ids: list[Any] = []
+def _collapse(chunks: list[Document], k: int) -> RetrievalResult:
+    """Collapse ranked chunks to at most k articles, each at its best rank. IDs are str."""
+    ids: list[str] = []
     docs: list[Document] = []
     for doc in chunks:
-        article_id = doc.metadata.get("article_id")
-        if article_id is None or article_id in seen:
+        raw_id = doc.metadata.get("article_id")
+        if raw_id is None:
             continue
-        seen.add(article_id)
+        article_id = str(raw_id)
+        if article_id in ids:
+            continue
         ids.append(article_id)
         docs.append(doc)
         if len(ids) == k:
             break
     return RetrievalResult(article_ids=ids, documents=docs)
+
+
+def retrieve_articles(
+    store: VectorStore, query: str, k: int = 5, overfetch: int = OVERFETCH_FACTOR
+) -> RetrievalResult:
+    """Search chunks, collapse to articles at each article's best rank, return top-k articles.
+
+    Fetches ``k * overfetch`` chunks; if that yields fewer than k unique articles and the
+    store may hold more, retries once with twice as many chunks.
+    """
+    if k <= 0:
+        return RetrievalResult()
+    fetch_k = k * max(overfetch, 1)
+    chunks = store.similarity_search(query, k=fetch_k)
+    result = _collapse(chunks, k)
+    if len(result.article_ids) < k and len(chunks) == fetch_k:
+        result = _collapse(store.similarity_search(query, k=fetch_k * 2), k)
+    return result
 
 
 def format_context(docs: list[Document]) -> str:
@@ -61,11 +77,13 @@ def format_context(docs: list[Document]) -> str:
     return "\n\n".join(blocks)
 
 
-def make_retriever_tool(store: VectorStore, k: int = 5) -> BaseTool:
+def make_retriever_tool(
+    store: VectorStore, k: int = 5, overfetch: int = OVERFETCH_FACTOR
+) -> BaseTool:
     """Build the `retrieve` tool. Returns (content, {"article_ids", "documents"})."""
 
     def retrieve(query: str) -> tuple[str, dict[str, Any]]:
-        result = retrieve_articles(store, query, k=k)
+        result = retrieve_articles(store, query, k=k, overfetch=overfetch)
         artifact = {"article_ids": result.article_ids, "documents": result.documents}
         return format_context(result.documents), artifact
 

@@ -9,6 +9,7 @@ def test_defaults():
     assert s.judge_model == "gpt-4o"
     assert s.embedding_model == "text-embedding-3-small"
     assert (s.chunk_size, s.chunk_overlap, s.top_k) == (1000, 200, 5)
+    assert s.retrieval_overfetch == 4
     assert s.chroma_dir == Path("data/chroma")
     assert s.openai_api_key is None and s.brave_api_key is None
 
