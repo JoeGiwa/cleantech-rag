@@ -6,6 +6,7 @@ are imported lazily, so importing this module never requires them.
 
 from __future__ import annotations
 
+import functools
 import math
 import re
 from collections.abc import Callable, Sequence
@@ -83,7 +84,7 @@ def precision_at_k_retrieved(
 def recall_at_k(retrieved: Sequence[str], relevant: Sequence[str], k: int = 5) -> float:
     """Recall@k: unique relevant docs in the top k over the number of unique relevant docs."""
     rel = set(relevant)
-    if not rel:
+    if not rel or k <= 0:
         return 0.0
     hits, _ = _hits_at_k(retrieved, relevant, k)
     return hits / len(rel)
@@ -100,6 +101,8 @@ def mrr(retrieved: Sequence[str], relevant: Sequence[str]) -> float:
 
 def ndcg_at_k(retrieved: Sequence[str], relevant: Sequence[str], k: int = 5) -> float:
     """Binary-relevance NDCG@k with log2 discount."""
+    if k <= 0:
+        return 0.0
     rel = set(relevant)
     dcg = sum(
         1.0 / math.log2(rank + 1)
@@ -125,7 +128,8 @@ def bleu_score(prediction: str, reference: str) -> float:
     """Sentence BLEU (smoothing method1) using a regex tokenizer.
 
     No exceptions are swallowed: the original notebook's bare ``except`` hid an nltk error and
-    reported 0.0 for every query. Empty inputs return 0.0 explicitly.
+    reported 0.0 for every query. Note: with smoothing method1, identical strings shorter than
+    4 tokens score below 1.0 (no 4-grams exist). Empty inputs return 0.0 explicitly.
     """
     bleu = _require("nltk.translate.bleu_score", "nltk")
     pred_tokens = tokenize(prediction)
@@ -146,6 +150,7 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
+@functools.lru_cache(maxsize=None)
 def default_encoder(model_name: str = DEFAULT_ENCODER_MODEL) -> Encoder:
     """Build an encoder backed by sentence-transformers (lazy import; may download weights)."""
     st = _require("sentence_transformers", "sentence-transformers")

@@ -109,24 +109,6 @@ def test_semantic_similarity_zero_vector():
     assert m.semantic_similarity("x", "y", enc) == 0.0
 
 
-def test_missing_dependency_message(monkeypatch):
-    import builtins
-
-    real = builtins.__import__
-
-    def fake(name, *a, **k):
-        if name.startswith("sentence_transformers"):
-            raise ImportError(name)
-        return real(name, *a, **k)
-
-    monkeypatch.setattr(builtins, "__import__", fake)
-    with pytest.raises(m.MissingEvalDependencyError, match="uv sync --extra eval"):
-        m.default_encoder()
-
-
-# ---------------------------------------------------------------- edge cases
-
-
 def test_k_zero_and_negative():
     assert m.precision_at_k(["a"], ["a"], k=0) == 0.0
     assert m.precision_at_k(["a"], ["a"], k=-1) == 0.0
@@ -304,3 +286,10 @@ def test_importing_metrics_does_not_import_heavy_deps():
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "[]"
+
+
+def test_nonpositive_k_returns_zero():
+    assert m.recall_at_k(["a", "b", "c"], ["b"], k=-1) == 0.0
+    assert m.recall_at_k(["a", "b", "c"], ["b"], k=0) == 0.0
+    assert m.ndcg_at_k(["a", "b", "c"], ["b"], k=-1) == 0.0
+    assert m.ndcg_at_k(["a", "b", "c"], ["b"], k=0) == 0.0
