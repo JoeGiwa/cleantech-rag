@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ from cleantech_rag.evaluation.datasets import (
     load_url_index,
     map_article_ids,
 )
+from cleantech_rag.evaluation.metrics import missing_eval_extras
 from cleantech_rag.evaluation.runner import (
     EvalItem,
     ResumeMismatchError,
@@ -30,6 +32,41 @@ from cleantech_rag.evaluation.runner import (
 from cleantech_rag.vectorstore import build_index, estimate_cost, index_exists, load_index
 
 app = typer.Typer(help="CleanTech agentic RAG.", no_args_is_help=True, add_completion=False)
+
+NOISY_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "openai",
+    "urllib3",
+    "huggingface_hub",
+    "sentence_transformers",
+    "transformers",
+    "filelock",
+)
+
+
+def configure_logging(verbose: bool = False) -> None:
+    """INFO messages always; third-party HTTP/download chatter only with ``--verbose``."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    level = logging.INFO if verbose else logging.WARNING
+    for name in NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(level)
+    if not verbose:
+        # Read when huggingface_hub is imported (lazily, on first use of the encoder).
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
+
+@app.callback()
+def _root(
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Show HTTP request and model-download logs (put before the command).",
+    ),
+) -> None:
+    configure_logging(verbose)
+
 
 CORPUS_FILE = "cleantech_media_dataset_v3_2024-10-28.csv"
 SIMPLE_QA_FILE = "cleantech_rag_evaluation_data_2024-09-20.csv"
@@ -99,20 +136,28 @@ def _setup_agent(settings: Settings):
     return create_agent(store, _make_llm(settings), settings)
 
 
+def _echo_sources(result) -> None:
+    ids = list(getattr(result, "retrieved_ids", None) or [])
+    if not ids:
+        typer.echo("Sources: no articles retrieved this turn.")
+        return
+    by_id = {s["id"]: s for s in (getattr(result, "sources", None) or [])}
+    typer.echo("Sources:")
+    for n, article_id in enumerate(ids, start=1):
+        src = by_id.get(article_id, {})
+        line = f"  [{n}] {src.get('title') or '(untitled)'} (ID {article_id})"
+        if src.get("url"):
+            line += f"\n      {src['url']}"
+        typer.echo(line)
+
+
 @app.command()
 def ask(question: str = typer.Argument(..., help="Question to ask the agent.")) -> None:
     """Answer one question (single-shot, no memory); use `chat` for a conversation."""
     agent = _setup_agent(get_settings())
     result = agent.run(question)
     typer.echo(result.answer)
-
-
-def _echo_sources(result) -> None:
-    ids = list(getattr(result, "retrieved_ids", None) or [])
-    if ids:
-        typer.echo(f"Sources (article IDs): {', '.join(ids)}")
-    else:
-        typer.echo("Sources: no articles retrieved this turn.")
+    _echo_sources(result)
 
 
 @app.command()
@@ -225,6 +270,12 @@ def evaluate(
             2,
         )
 
+    missing = missing_eval_extras()
+    if missing:  # before any paid call
+        raise _fail(
+            f"evaluation needs {', '.join(missing)}. Install the extras: `uv sync --extra eval`."
+        )
+
     settings = get_settings()
     if judge_model:
         settings = settings.model_copy(update={"judge_model": judge_model})
@@ -297,7 +348,6 @@ def evaluate(
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
     app()
 
 

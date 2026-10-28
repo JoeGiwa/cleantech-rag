@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from types import SimpleNamespace
 
@@ -351,7 +352,7 @@ def test_chat_multi_turn_same_thread_and_sources(tmp_path, monkeypatch):
     assert [q for q, _ in calls] == ["first", "web"]
     assert calls[0][1] and calls[0][1] == calls[1][1]
     assert "ans:first" in res.output and "ans:web" in res.output
-    assert "7, 9" in res.output
+    assert "(ID 7)" in res.output and "(ID 9)" in res.output
     assert "no articles retrieved" in res.output
 
 
@@ -428,6 +429,7 @@ def _eval_setup(tmp_path, monkeypatch, n=5):
 
     monkeypatch.setattr(cli, "get_settings", lambda: s)
     monkeypatch.setattr(cli, "_setup_agent", lambda settings: FakeAgent())
+    monkeypatch.setattr(cli, "missing_eval_extras", lambda: [])
     monkeypatch.setattr(
         "cleantech_rag.evaluation.metrics.default_encoder",
         lambda *a, **k: lambda texts: [[1.0, 0.0] for _ in texts],
@@ -738,3 +740,92 @@ def test_evaluate_prints_summary_coverage_including_on_resume(tmp_path, monkeypa
     assert "Summary covers 3 questions (1 from this run, 2 from resumed log)." in res.output
     res = _eval_invoke(tmp_path, "--no-judge", "--max-queries", "1", "--resume", str(log))
     assert "Summary covers 3 questions (0 from this run, 3 from resumed log)." in res.output
+
+
+# ---------------------------------------------------------------- issue 30 cleanups
+
+
+@pytest.fixture
+def restore_logging():
+    names = [*cli.NOISY_LOGGERS]
+    saved = {n: logging.getLogger(n).level for n in names}
+    yield
+    for n, lvl in saved.items():
+        logging.getLogger(n).setLevel(lvl)
+
+
+def test_noisy_loggers_hidden_by_default(tmp_path, monkeypatch, restore_logging):
+    _fake_agent(monkeypatch, _settings(tmp_path), [])
+    res = runner.invoke(cli.app, ["ask", "Q"])
+    assert res.exit_code == 0
+    for name in ("httpx", "huggingface_hub", "sentence_transformers"):
+        assert logging.getLogger(name).getEffectiveLevel() >= logging.WARNING
+
+
+def test_verbose_shows_noisy_loggers(tmp_path, monkeypatch, restore_logging):
+    _fake_agent(monkeypatch, _settings(tmp_path), [])
+    res = runner.invoke(cli.app, ["--verbose", "ask", "Q"])
+    assert res.exit_code == 0
+    for name in ("httpx", "huggingface_hub", "sentence_transformers"):
+        assert logging.getLogger(name).getEffectiveLevel() <= logging.INFO
+
+
+def test_verbose_in_root_help():
+    _, out = _help(["--help"])
+    assert "--verbose" in out
+
+
+def test_ask_prints_sources_with_title_url_id(tmp_path, monkeypatch):
+    class FakeAgent:
+        def run(self, q, thread_id=None):
+            return SimpleNamespace(
+                answer="A",
+                retrieved_ids=["7", "9"],
+                sources=[
+                    {"id": "7", "title": "Solar boom", "url": "http://x/7"},
+                    {"id": "9", "title": "", "url": ""},
+                ],
+            )
+
+    _fake_agent(monkeypatch, _settings(tmp_path), [])
+    monkeypatch.setattr(cli, "create_agent", lambda store, llm, settings: FakeAgent())
+    res = runner.invoke(cli.app, ["ask", "Q"])
+    assert res.exit_code == 0, res.output
+    assert "Solar boom" in res.output and "http://x/7" in res.output and "ID 7" in res.output
+    assert "ID 9" in res.output and "(untitled)" in res.output
+
+
+def test_ask_without_retrieval_says_so(tmp_path, monkeypatch):
+    _fake_agent(monkeypatch, _settings(tmp_path), [])
+    res = runner.invoke(cli.app, ["ask", "Q"])
+    assert "no articles retrieved" in res.output
+
+
+def test_chat_shows_titles(tmp_path, monkeypatch):
+    class FakeAgent:
+        def run(self, q, thread_id=None):
+            return SimpleNamespace(
+                answer="A",
+                retrieved_ids=["7"],
+                sources=[{"id": "7", "title": "Wind news", "url": "http://x/7"}],
+            )
+
+    _fake_agent(monkeypatch, _settings(tmp_path), [])
+    monkeypatch.setattr(cli, "create_agent", lambda store, llm, settings: FakeAgent())
+    res = runner.invoke(cli.app, ["chat"], input="hi\n")
+    assert "Wind news" in res.output and "ID 7" in res.output
+
+
+def test_evaluate_checks_extras_before_any_paid_call(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "missing_eval_extras", lambda: ["sentence-transformers"])
+
+    def boom(*a, **k):
+        raise AssertionError("must not be reached")
+
+    monkeypatch.setattr(cli, "_setup_agent", boom)
+    res = _eval_invoke(tmp_path, "--no-judge")
+    assert res.exit_code != 0
+    assert "sentence-transformers" in res.output and "--extra eval" in res.output
+    assert asked == []
+    assert not (tmp_path / "out").exists()
