@@ -25,7 +25,7 @@ from langgraph.prebuilt import ToolNode
 from typing_extensions import TypedDict
 
 from cleantech_rag.config import Settings, get_settings
-from cleantech_rag.memory import make_checkpointer, messages_to_trim, summarize
+from cleantech_rag.memory import make_checkpointer, messages_to_trim
 from cleantech_rag.tools.reasoning import make_reasoning_tool, message_text
 from cleantech_rag.tools.retriever import make_retriever_tool
 from cleantech_rag.tools.web_search import make_web_search_tool
@@ -260,12 +260,6 @@ class Agent:
         if saver is None:
             raise RuntimeError("Agent has no checkpointer; there is no memory to clear.")
         saver.delete_thread(thread_id)
-
-    def summary(self, thread_id: str) -> str:
-        """LLM summary of the thread's current history."""
-        if self._llm is None:
-            raise RuntimeError("Agent was built without an llm; summary is unavailable.")
-        return summarize(self._llm, self.history(thread_id))
 
 
 def create_agent(

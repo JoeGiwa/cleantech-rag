@@ -5,7 +5,6 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 
 from cleantech_rag.agent import Agent, build_graph
-from cleantech_rag.memory import NO_CONVERSATION
 
 
 def _tool():
@@ -77,16 +76,10 @@ def test_retrieved_ids_reset_each_turn_in_thread(fake_chat_model_factory):
     assert agent.run("Q2", thread_id="t").retrieved_ids == []
 
 
-def test_clear_and_summary(fake_chat_model_factory):
-    agent, llm = _agent(
-        fake_chat_model_factory,
-        [AIMessage(content="A1"), AIMessage(content="the summary")],
-    )
-    assert agent.summary("t") == NO_CONVERSATION
+def test_clear(fake_chat_model_factory):
+    agent, _ = _agent(fake_chat_model_factory, [AIMessage(content="A1")])
     agent.run("Q1", thread_id="t")
-    assert agent.summary("t") == "the summary"
-    prompt = llm.calls[-1][0].content
-    assert "User: Q1" in prompt and "Assistant: A1" in prompt
+    assert agent.history("t") != []
     agent.clear("t")
     assert agent.history("t") == []
 
@@ -170,39 +163,6 @@ def test_clear_does_not_affect_other_threads_and_unknown_is_noop(fake_chat_model
     agent.clear("never-existed")
     assert _humans(agent.history("keep")) == ["Q1"]
     assert agent.history("drop") == []
-
-
-def test_summary_empty_thread_does_not_call_llm(fake_chat_model_factory):
-    agent, llm = _agent(fake_chat_model_factory, [AIMessage(content="x")])
-    assert agent.summary("nothing") == NO_CONVERSATION
-    assert llm.calls == []
-
-
-def test_summary_after_clear_is_empty(fake_chat_model_factory):
-    agent, _ = _agent(fake_chat_model_factory, [AIMessage(content="A1")])
-    agent.run("Q1", thread_id="t")
-    agent.clear("t")
-    assert agent.summary("t") == NO_CONVERSATION
-
-
-def test_summary_reads_live_state_and_skips_tool_traffic(fake_chat_model_factory):
-    agent, llm = _agent(
-        fake_chat_model_factory,
-        [_call(), AIMessage(content="A1"), AIMessage(content="A2"), AIMessage(content="sum")],
-    )
-    agent.run("Q1", thread_id="t")
-    agent.run("Q2", thread_id="t")
-    assert agent.summary("t") == "sum"
-    prompt = llm.calls[-1][0].content
-    assert "User: Q1" in prompt and "Assistant: A1" in prompt
-    assert "User: Q2" in prompt and "Assistant: A2" in prompt
-
-
-def test_summary_without_llm_raises(fake_chat_model_factory):
-    llm = fake_chat_model_factory([AIMessage(content="A")])
-    agent = Agent(build_graph(llm, [_tool()]), 12)
-    with pytest.raises(RuntimeError):
-        agent.summary("t")
 
 
 def test_retrieved_ids_do_not_leak_when_turn_two_skips_retriever(fake_chat_model_factory):

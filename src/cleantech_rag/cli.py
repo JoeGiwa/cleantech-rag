@@ -1,4 +1,4 @@
-"""Command line interface: ``ask``, ``chat``, ``build-index`` and ``evaluate`` commands."""
+"""Command line interface: ``ask``, ``chat``, ``build-index``, ``evaluate`` and ``report``."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from cleantech_rag.evaluation.runner import (
     ResumeMismatchError,
     RunLog,
     evaluate_items,
+    read_header,
     summarize,
     write_outputs,
 )
@@ -260,14 +261,18 @@ def load_eval_items(raw_dir: Path, dataset: str) -> list[EvalItem]:
 
 @app.command()
 def evaluate(
-    dataset: Literal["complex", "simple"] = typer.Option("complex", "--dataset"),
+    dataset: Annotated[
+        Literal["complex", "simple"] | None,
+        typer.Option("--dataset", help="Eval set (default complex; a resumed run keeps its own)."),
+    ] = None,
     max_queries: int | None = typer.Option(
         None,
         "--max-queries",
         min=1,
         help=(
             f"Queries to run (default {DEFAULT_MAX_QUERIES}; more than "
-            f"{MAX_QUERIES_WITHOUT_CONFIRM} needs --yes-full-eval, which alone runs all)."
+            f"{MAX_QUERIES_WITHOUT_CONFIRM} needs --yes-full-eval, which alone runs all). "
+            "With --resume, defaults to the original run's value."
         ),
     ),
     no_judge: bool = typer.Option(False, "--no-judge", help="Skip the LLM judge."),
@@ -278,15 +283,40 @@ def evaluate(
     output_dir: Annotated[Path, typer.Option("--output-dir")] = Path("results"),
     resume: Annotated[
         Path | None,
-        typer.Option("--resume", help="Continue a run log (.jsonl): skip completed questions."),
+        typer.Option(
+            "--resume",
+            help="Continue a run log (.jsonl): skip completed questions. Dataset, judge and "
+            "query limit are inherited from the log.",
+        ),
     ] = None,
     verbose: VerboseOpt = False,
 ) -> None:
     """Evaluate the agent on a dataset; writes a summary JSON and a per-query CSV."""
     _apply_verbose(verbose)
-    if max_queries is None and not yes_full_eval:
-        max_queries = DEFAULT_MAX_QUERIES
-    if max_queries is not None and max_queries > MAX_QUERIES_WITHOUT_CONFIRM and not yes_full_eval:
+    stored: dict = {}
+    if resume is not None:
+        try:
+            stored = read_header(resume)
+        except (ResumeMismatchError, FileNotFoundError) as exc:
+            raise _fail(str(exc)) from exc
+        if max_queries is None and not yes_full_eval:
+            if "max_queries" not in stored:
+                raise _fail(
+                    f"{resume} was written by an older version and does not record its query "
+                    "limit; pass --max-queries N or --yes-full-eval explicitly."
+                )
+            max_queries = stored["max_queries"]  # None means the original run was a full run
+        dataset = dataset or stored.get("dataset") or "complex"
+    else:
+        dataset = dataset or "complex"
+        if max_queries is None and not yes_full_eval:
+            max_queries = DEFAULT_MAX_QUERIES
+    if (
+        max_queries is not None
+        and max_queries > MAX_QUERIES_WITHOUT_CONFIRM
+        and not yes_full_eval
+        and not (resume is not None and max_queries == stored.get("max_queries"))
+    ):
         raise _fail(
             f"--max-queries {max_queries} exceeds {MAX_QUERIES_WITHOUT_CONFIRM}; "
             "pass --yes-full-eval to confirm (this costs money).",
@@ -300,6 +330,10 @@ def evaluate(
         )
 
     settings = get_settings()
+    if resume is not None and not no_judge and not stored.get("judge_enabled", True):
+        no_judge = True  # the original run had no judge
+    if not judge_model and stored.get("judge_model"):
+        judge_model = stored["judge_model"]
     if judge_model:
         settings = settings.model_copy(update={"judge_model": judge_model})
     items = load_eval_items(settings.raw_data_dir, dataset)
@@ -322,6 +356,13 @@ def evaluate(
         "judge_enabled": judge is not None,
         "judge_model": settings.judge_model if judge is not None else None,
     }
+    if resume is not None:
+        # Compare against the log's own recorded query limit (this run may override it); logs
+        # from before the limit was recorded have none.
+        if "max_queries" in stored:
+            config["max_queries"] = stored["max_queries"]
+    else:
+        config["max_queries"] = max_queries
     log_path = resume or output_dir / f"run_{now.strftime('%Y%m%dT%H%M%S')}.jsonl"
     try:
         log = RunLog(log_path, config, resume=resume is not None)
@@ -383,7 +424,7 @@ def report(
 ) -> None:
     """Make a markdown table and PNG charts from an evaluation summary JSON (offline, free)."""
     _apply_verbose(verbose)
-    if not summary.exists():
+    if not summary.is_file():
         raise _fail(f"Summary file not found at {summary}.")
     try:
         from cleantech_rag.evaluation.report import generate_report
@@ -391,7 +432,7 @@ def report(
         paths = generate_report(summary, output_dir or summary.parent)
     except ImportError as exc:
         raise _fail(f"{exc}. Install the extras: `uv sync --extra eval`.") from exc
-    except (ValueError, FileNotFoundError) as exc:
+    except (ValueError, TypeError, AttributeError, OSError) as exc:
         raise _fail(f"cannot read summary {summary}: {exc}") from exc
     for path in paths:
         typer.echo(f"Wrote {path}")

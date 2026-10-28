@@ -652,14 +652,80 @@ def test_evaluate_writes_jsonl_and_resume_skips_completed(tmp_path, monkeypatch)
     assert data["counts"]["n_evaluated"] == 4
 
 
-def test_evaluate_resume_mismatched_config_refused(tmp_path, monkeypatch):
+def _first_log(tmp_path):
+    return next((tmp_path / "out").glob("run_*.jsonl"))
+
+
+def test_evaluate_resume_inherits_judge_setting(tmp_path, monkeypatch):
     asked = _eval_setup(tmp_path, monkeypatch)
     assert _eval_invoke(tmp_path, "--no-judge", "--max-queries", "1").exit_code == 0
-    log = next((tmp_path / "out").glob("run_*.jsonl"))
     asked.clear()
-    # judge enabled now differs from the log header
-    res = _eval_invoke(tmp_path, "--resume", str(log), "--max-queries", "2")
+    # no --no-judge passed: the log's "no judge" is inherited, so no judge is built
+    res = _eval_invoke(tmp_path, "--resume", str(_first_log(tmp_path)), "--max-queries", "2")
+    assert res.exit_code == 0, res.output
+    assert len(asked) == 1
+
+
+def test_evaluate_resume_conflicting_dataset_refused(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    assert _eval_invoke(tmp_path, "--no-judge", "--max-queries", "1").exit_code == 0
+    asked.clear()
+    res = _eval_invoke(
+        tmp_path, "--resume", str(_first_log(tmp_path)), "--dataset", "simple", "--max-queries", "2"
+    )
     assert res.exit_code != 0 and asked == []
+
+
+def test_evaluate_resume_inherits_max_queries(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    assert _eval_invoke(tmp_path, "--no-judge", "--max-queries", "2").exit_code == 0
+    asked.clear()
+    res = _eval_invoke(tmp_path, "--no-judge", "--resume", str(_first_log(tmp_path)))
+    assert res.exit_code == 0, res.output
+    assert "0 of 2 questions remaining" in res.output  # not the default 3
+    assert asked == []
+
+
+def test_evaluate_resume_inherits_full_run_without_confirmation_flag(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)  # 5 questions
+    first = _eval_invoke(tmp_path, "--no-judge", "--yes-full-eval")
+    assert first.exit_code == 0, first.output
+    log = _first_log(tmp_path)
+    lines = log.read_text().splitlines()
+    log.write_text("\n".join(lines[:3]) + "\n")  # header + 2 rows
+    asked.clear()
+    res = _eval_invoke(tmp_path, "--no-judge", "--resume", str(log))
+    assert res.exit_code == 0, res.output
+    assert len(asked) == 3
+    assert "Summary covers 5 questions" in res.output
+
+
+def test_evaluate_resume_explicit_max_queries_overrides(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    assert _eval_invoke(tmp_path, "--no-judge", "--max-queries", "2").exit_code == 0
+    asked.clear()
+    res = _eval_invoke(
+        tmp_path, "--no-judge", "--resume", str(_first_log(tmp_path)), "--max-queries", "4"
+    )
+    assert res.exit_code == 0, res.output
+    assert len(asked) == 2
+
+
+def test_evaluate_resume_old_log_without_limit_needs_explicit_flag(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch)
+    assert _eval_invoke(tmp_path, "--no-judge", "--max-queries", "2").exit_code == 0
+    log = _first_log(tmp_path)
+    lines = log.read_text().splitlines()
+    header = json.loads(lines[0])
+    del header["config"]["max_queries"]  # simulate a log from before the field existed
+    log.write_text("\n".join([json.dumps(header), *lines[1:]]) + "\n")
+    asked.clear()
+    res = _eval_invoke(tmp_path, "--no-judge", "--resume", str(log))
+    assert res.exit_code == 1 and asked == []
+    assert "max-queries" in res.output
+    res = _eval_invoke(tmp_path, "--no-judge", "--resume", str(log), "--max-queries", "3")
+    assert res.exit_code == 0, res.output
+    assert len(asked) == 1
 
 
 def test_evaluate_resume_missing_file_fails(tmp_path, monkeypatch):
