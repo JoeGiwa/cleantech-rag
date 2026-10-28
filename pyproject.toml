@@ -19,6 +19,7 @@ dependencies = [
     "pydantic-settings>=2.16.1",
     "python-dotenv>=1.2.4",
     "requests>=2.34.2",
+    "tiktoken>=0.14.0",
 ]
 
 [project.scripts]
