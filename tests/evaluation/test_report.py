@@ -2,13 +2,10 @@ import json
 import re
 
 import pytest
+from typer.testing import CliRunner
 
-pytest.importorskip("matplotlib")
-
-from typer.testing import CliRunner  # noqa: E402
-
-from cleantech_rag import cli  # noqa: E402
-from cleantech_rag.evaluation import report  # noqa: E402
+from cleantech_rag import cli
+from cleantech_rag.evaluation import report
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
@@ -197,3 +194,56 @@ def test_load_summary_rejects_non_object(tmp_path):
     path.write_text("[1]", encoding="utf-8")
     with pytest.raises(ValueError):
         report.load_summary(path)
+
+
+@pytest.mark.parametrize("bad", [None, [1, 2], "text", 5])
+@pytest.mark.parametrize("section", ["config", "counts", "retrieval", "response", "judge"])
+def test_wrong_shaped_sections_do_not_crash(tmp_path, section, bad):
+    summary = synthetic_summary()
+    summary[section] = bad
+    out = tmp_path / "out"
+    paths = report.generate_report(_write(tmp_path, summary), out)
+    assert (out / "summary_x.md").exists()
+    assert all(p.exists() for p in paths)
+
+
+def test_non_numeric_metric_values_do_not_crash(tmp_path):
+    summary = synthetic_summary()
+    summary["retrieval"]["all_queries"]["mrr"] = "high"
+    summary["retrieval"]["all_queries"]["n"] = "three"
+    summary["response"]["bleu"] = [0.1]
+    summary["response"]["rouge1"] = True
+    summary["judge"]["overall"] = {"x": 1}
+    out = tmp_path / "out"
+    report.generate_report(_write(tmp_path, summary), out)
+    md = (out / "summary_x.md").read_text(encoding="utf-8")
+    assert "| BLEU | n/a |" in md and "| MRR | n/a | 0.600 |" in md
+
+
+def test_cli_directory_path_clean_error(tmp_path):
+    res = CliRunner().invoke(cli.app, ["report", str(tmp_path)])
+    assert res.exit_code == 1
+    assert isinstance(res.exception, SystemExit), repr(res.exception)
+
+
+def test_cli_unexpected_shape_errors_are_clean(tmp_path, monkeypatch):
+    path = _write(tmp_path, synthetic_summary())
+    for exc in (TypeError("t"), AttributeError("a"), PermissionError("p")):
+
+        def boom(*a, _exc=exc, **k):
+            raise _exc
+
+        monkeypatch.setattr("cleantech_rag.evaluation.report.generate_report", boom)
+        res = CliRunner().invoke(cli.app, ["report", str(path)])
+        assert res.exit_code == 1 and isinstance(res.exception, SystemExit), repr(exc)
+
+
+def test_missing_matplotlib_leaves_no_stray_markdown(tmp_path, monkeypatch):
+    def no_mpl():
+        raise ImportError("matplotlib is required")
+
+    monkeypatch.setattr(report, "_pyplot", no_mpl)
+    out = tmp_path / "out"
+    with pytest.raises(ImportError):
+        report.generate_report(_write(tmp_path, synthetic_summary()), out)
+    assert not out.exists() or list(out.iterdir()) == []
