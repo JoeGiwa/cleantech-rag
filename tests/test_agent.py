@@ -1,13 +1,20 @@
 from pathlib import Path
 
-import pytest
 from langchain_core.documents import Document
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langchain_core.vectorstores import InMemoryVectorStore
-from langgraph.errors import GraphRecursionError
 
-from cleantech_rag.agent import AgentResult, create_agent
+from cleantech_rag.agent import (
+    STEP_LIMIT_ANSWER,
+    Agent,
+    AgentResult,
+    build_graph,
+    create_agent,
+    merge_ids,
+)
 from cleantech_rag.config import Settings
+from cleantech_rag.tools.retriever import retrieve_articles
 
 
 def _store(emb, n=8):
@@ -41,7 +48,8 @@ def test_retrieve_then_answer(fake_embeddings, fake_chat_model_factory):
     assert isinstance(res, AgentResult)
     assert res.answer == "The answer."
     assert len(res.retrieved_ids) == 3 and all(isinstance(i, str) for i in res.retrieved_ids)
-    assert res.tools_used == ["retrieve"]
+    assert res.tools_used == [{"tool": "retrieve", "ok": True}]
+    assert res.stopped_reason == "completed"
 
 
 def test_web_search_run_does_not_leak_previous_ids(fake_embeddings, fake_chat_model_factory):
@@ -57,13 +65,12 @@ def test_web_search_run_does_not_leak_previous_ids(fake_embeddings, fake_chat_mo
     assert agent.run("a").retrieved_ids != []
     res = agent.run("b")
     assert res.retrieved_ids == []
-    assert res.tools_used == ["web_search"]
+    assert res.tools_used == [{"tool": "web_search", "ok": True}]
     assert res.answer == "second"
 
 
 def test_two_retrievals_dedup_union_cut_to_k(fake_embeddings, fake_chat_model_factory):
     store = _store(fake_embeddings)
-    from cleantech_rag.tools.retriever import retrieve_articles
 
     first = retrieve_articles(store, "solar a", k=3).article_ids
     second = retrieve_articles(store, "solar b", k=3).article_ids
@@ -82,38 +89,44 @@ def test_two_retrievals_dedup_union_cut_to_k(fake_embeddings, fake_chat_model_fa
     assert len(set(res.retrieved_ids)) == len(res.retrieved_ids) <= 3
 
 
-def test_reasoning_ids_toggle(fake_embeddings, fake_chat_model_factory):
-    script = [_call("reasoning_chain", "why", "1"), AIMessage(content="r"), AIMessage(content="d")]
-    on = _agent(fake_embeddings, fake_chat_model_factory, list(script)).run("q")
-    off = _agent(
-        fake_embeddings, fake_chat_model_factory, list(script), count_reasoning_ids=False
-    ).run("q")
-    assert on.retrieved_ids and off.retrieved_ids == []
-
-
-def test_recursion_limit_enforced(fake_embeddings, fake_chat_model_factory):
+def test_retrieve_plus_reasoning_merged_deduped_cut_to_k(fake_embeddings, fake_chat_model_factory):
+    store = _store(fake_embeddings)
+    first = retrieve_articles(store, "solar a", k=3).article_ids
+    second = retrieve_articles(store, "why", k=3).article_ids
+    expected = list(dict.fromkeys(first + second))[:3]
     agent = _agent(
         fake_embeddings,
         fake_chat_model_factory,
-        [_call("web_search", "loop", str(i)) for i in range(20)],  # never answers
+        [
+            _call("retrieve", "solar a", "1"),
+            _call("reasoning_chain", "why", "2"),
+            AIMessage(content="r"),  # reasoning tool's internal LLM call
+            AIMessage(content="done"),
+        ],
+    )
+    res = agent.run("q")
+    assert res.retrieved_ids == expected and len(res.retrieved_ids) <= 3
+    assert res.tools_used == [
+        {"tool": "retrieve", "ok": True},
+        {"tool": "reasoning_chain", "ok": True},
+    ]
+
+
+def test_step_limit_returns_fallback_with_partial_state(fake_embeddings, fake_chat_model_factory):
+    agent = _agent(
+        fake_embeddings,
+        fake_chat_model_factory,
+        [_call("retrieve", "loop", str(i)) for i in range(20)],  # never answers
         recursion_limit=5,
     )
-    with pytest.raises(GraphRecursionError):
-        agent.run("q")
+    res = agent.run("q")
+    assert res.stopped_reason == "step_limit"
+    assert res.answer == STEP_LIMIT_ANSWER
+    assert len(res.retrieved_ids) == 3
+    assert res.tools_used and all(t == {"tool": "retrieve", "ok": True} for t in res.tools_used)
 
 
-def test_no_agent_executor_in_src():
-    src = Path(__file__).resolve().parents[1] / "src"
-    for f in src.rglob("*.py"):
-        assert "AgentExecutor" not in f.read_text(), f
-
-
-# ---- edge cases -------------------------------------------------------------------------------
-
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage  # noqa: E402
-from langchain_core.tools import StructuredTool  # noqa: E402
-
-from cleantech_rag.agent import Agent, build_graph, merge_ids  # noqa: E402
+# ---- edge cases ----------------------------------------------------------------------------
 
 
 def _stub_tool(name, ids, artifact=True):
@@ -178,7 +191,7 @@ def test_parallel_tool_calls_in_one_message(fake_chat_model_factory):
     )
     res = agent.run("q")
     assert res.retrieved_ids == ["1", "2", "9"]
-    assert res.tools_used == ["retrieve", "web_search", "reasoning_chain"]
+    assert [t["tool"] for t in res.tools_used] == ["retrieve", "web_search", "reasoning_chain"]
 
 
 def test_tools_used_keeps_order_and_repeats(fake_chat_model_factory):
@@ -188,7 +201,7 @@ def test_tools_used_keeps_order_and_repeats(fake_chat_model_factory):
         [_multi("retrieve"), _multi("web_search"), _multi("retrieve"), AIMessage(content="ok")],
         tools,
     )
-    assert agent.run("q").tools_used == ["retrieve", "web_search", "retrieve"]
+    assert [t["tool"] for t in agent.run("q").tools_used] == ["retrieve", "web_search", "retrieve"]
 
 
 def test_tool_without_artifact_does_not_break_or_add_ids(fake_chat_model_factory):
@@ -220,6 +233,7 @@ def test_raising_tool_is_reported_to_model_not_crash(fake_chat_model_factory):
     )
     res = agent.run("q")
     assert res.answer == "recovered" and res.retrieved_ids == []
+    assert res.tools_used == [{"tool": "retrieve", "ok": False}]
     tool_msgs = [m for m in llm.calls[-1] if isinstance(m, ToolMessage)]
     assert tool_msgs and "kaboom" in tool_msgs[0].content
 
@@ -232,6 +246,7 @@ def test_unknown_tool_name_is_reported_not_crash(fake_chat_model_factory):
     )
     res = agent.run("q")
     assert res.answer == "ok" and res.retrieved_ids == []
+    assert res.tools_used == [{"tool": "nonexistent", "ok": False}]
 
 
 def test_direct_answer_without_tools(fake_chat_model_factory):
@@ -311,3 +326,11 @@ def test_no_agent_executor_anywhere_in_repo_python():
                 continue
             text = f.read_text()
             assert "AgentExecutor" not in text and "create_tool_calling_agent" not in text, f
+
+
+def test_recursion_limit_comes_from_settings(fake_embeddings, fake_chat_model_factory):
+    llm = fake_chat_model_factory([AIMessage(content="x")])
+    agent = create_agent(
+        _store(fake_embeddings), llm, Settings(agent_recursion_limit=7, _env_file=None)
+    )
+    assert agent.recursion_limit == 7

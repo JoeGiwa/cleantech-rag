@@ -14,6 +14,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_core.vectorstores import VectorStore
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -45,7 +46,14 @@ Always prioritize accuracy and cite your sources when possible."""
 class AgentResult:
     answer: str
     retrieved_ids: list[str] = field(default_factory=list)
-    tools_used: list[str] = field(default_factory=list)
+    tools_used: list[dict[str, Any]] = field(default_factory=list)  # [{"tool", "ok"}], call order
+    stopped_reason: str = "completed"  # "completed" or "step_limit"
+
+
+STEP_LIMIT_ANSWER = (
+    "I could not finish answering within the allowed number of reasoning steps. "
+    "Please try rephrasing or narrowing the question."
+)
 
 
 class AgentState(TypedDict):
@@ -66,7 +74,6 @@ def build_graph(
     llm: BaseChatModel,
     tools: list[BaseTool],
     k: int = 5,
-    count_reasoning_ids: bool = True,
 ):
     """Compile the agent/tools loop. ``llm`` must support ``bind_tools``."""
     llm_with_tools = llm.bind_tools(tools)
@@ -82,7 +89,7 @@ def build_graph(
         for msg in out["messages"]:
             if not isinstance(msg, ToolMessage) or not isinstance(msg.artifact, dict):
                 continue
-            if msg.name == "reasoning_chain" and not count_reasoning_ids:
+            if msg.status == "error":
                 continue
             ids = merge_ids(ids, [str(i) for i in msg.artifact.get("article_ids", [])], k)
         return {"messages": out["messages"], "retrieved_ids": ids}
@@ -106,26 +113,36 @@ class Agent:
         self.recursion_limit = recursion_limit
 
     def run(self, question: str) -> AgentResult:
-        """Answer one question. Raises ``GraphRecursionError`` if the loop exceeds the limit."""
-        final = self._graph.invoke(
-            {"messages": [HumanMessage(content=question)], "retrieved_ids": []},
-            config={"recursion_limit": self.recursion_limit},
-        )
-        messages = final["messages"]
-        tools_used: list[str] = []
-        for m in messages:
-            if isinstance(m, AIMessage):
-                tools_used.extend(c["name"] for c in m.tool_calls)
-        answer = message_text(messages[-1].content) if messages else ""
-        return AgentResult(answer, list(final["retrieved_ids"]), tools_used)
+        """Answer one question; on hitting the step limit return a fallback with partial state."""
+        state: dict[str, Any] = {"messages": [], "retrieved_ids": []}
+        stopped = "completed"
+        try:
+            for chunk in self._graph.stream(
+                {"messages": [HumanMessage(content=question)], "retrieved_ids": []},
+                config={"recursion_limit": self.recursion_limit},
+                stream_mode="values",
+            ):
+                state = chunk  # keep the latest full state
+        except GraphRecursionError:
+            stopped = "step_limit"
+        messages = state["messages"]
+        tools_used = [
+            {"tool": m.name, "ok": m.status != "error"}
+            for m in messages
+            if isinstance(m, ToolMessage)
+        ]
+        if stopped == "step_limit":
+            answer = STEP_LIMIT_ANSWER
+        else:
+            answer = message_text(messages[-1].content) if messages else ""
+        return AgentResult(answer, list(state["retrieved_ids"]), tools_used, stopped)
 
 
 def create_agent(
     store: VectorStore,
     llm: BaseChatModel,
     settings: Settings | None = None,
-    recursion_limit: int = 12,
-    count_reasoning_ids: bool = True,
+    recursion_limit: int | None = None,
 ) -> Agent:
     """Wire the three tools (chat model injected) into the graph."""
     settings = settings or get_settings()
@@ -135,5 +152,5 @@ def create_agent(
         make_web_search_tool(settings),
         make_reasoning_tool(store, llm, k=k, overfetch=over),
     ]
-    graph = build_graph(llm, tools, k=k, count_reasoning_ids=count_reasoning_ids)
-    return Agent(graph, recursion_limit)
+    graph = build_graph(llm, tools, k=k)
+    return Agent(graph, recursion_limit or settings.agent_recursion_limit)
