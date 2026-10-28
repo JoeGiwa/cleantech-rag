@@ -31,7 +31,7 @@ def _message_text(content: str | list[Any]) -> str:
         if isinstance(block, str):
             parts.append(block)
         elif isinstance(block, dict) and block.get("type") == "text":
-            parts.append(str(block.get("text", "")))
+            parts.append(str(block.get("text") or ""))
     return "".join(parts)
 
 

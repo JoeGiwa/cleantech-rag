@@ -98,6 +98,7 @@ def test_question_in_prompt_and_non_string_content(monkeypatch, fake_chat_model_
     content = [
         {"type": "text", "text": "Step 1. "},
         {"type": "tool_use", "id": "t", "name": "x", "input": {}},
+        {"type": "text", "text": None},
         "Step 2.",
     ]
     llm = fake_chat_model_factory([AIMessage(content=content)])
