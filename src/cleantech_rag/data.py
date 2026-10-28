@@ -24,7 +24,7 @@ def load_articles(
     ``limit`` keeps the first ``limit`` articles; ``include_ids`` articles are always
     kept in addition (original order preserved). ``include_ids`` without ``limit`` is a
     no-op because every article is already included. Duplicate ids keep the first row.
-    Raises ``ValueError`` if the ``content`` or ``date`` column is missing.
+    Raises ``ValueError`` if the ``id``, ``content`` or ``date`` column is missing.
     """
     df = pd.read_csv(path)
     if "Unnamed: 0" in df.columns:
@@ -36,9 +36,9 @@ def load_articles(
         if col not in df.columns:
             df[col] = ""
     df["id"] = df["id"].astype(str)
-    df = df.drop_duplicates(subset="id", keep="first")
     content = df["content"].fillna("").astype(str)
     df = df[content.str.strip() != ""]
+    df = df.drop_duplicates(subset="id", keep="first")
     if limit is not None:
         mask = pd.Series(False, index=df.index)
         mask.iloc[: max(limit, 0)] = True

@@ -99,6 +99,12 @@ def test_duplicate_ids_keep_first(tmp_path):
     assert list(df["title"]) == ["A"]
 
 
+def test_duplicate_id_with_empty_first_row_keeps_nonempty(tmp_path):
+    p = _write_csv(tmp_path, HEADER + "1,A,2024-01-01,a,,d,u\n1,B,2024-01-02,b,second,d,u\n")
+    df = load_articles(p)
+    assert list(df["title"]) == ["B"]
+
+
 # ---- edge cases -------------------------------------------------------------------
 
 
