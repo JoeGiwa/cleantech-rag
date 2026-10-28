@@ -1,20 +1,20 @@
 """LLM-as-judge: scores an answer on four 1-5 criteria with honest failure handling.
 
-A judge failure (model error, malformed JSON, out-of-range score) is recorded as ``None`` plus an
-error message, never as 0, and aggregates exclude failures and report ``n_failed``.
+The judge model is a LangChain chat model used through ``with_structured_output(JudgeScores)``,
+so the scores come back already validated against a Pydantic schema. A judge failure (model
+error, schema validation error, unexpected return) is recorded as ``None`` plus an error message,
+never as 0, and aggregates exclude failures and report ``n_failed``.
 
-The judge model is injected: anything with ``invoke(prompt)`` returning an object with a
-``content`` string (a LangChain chat model) or a plain string. ``build_judge_model`` creates the
-real one lazily.
+The judge model is injected; ``build_judge_model`` creates the real one lazily.
 """
 
 from __future__ import annotations
 
-import json
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
+
+from pydantic import BaseModel, Field, StrictInt, ValidationError
 
 from cleantech_rag.config import Settings, get_settings
 
@@ -38,19 +38,16 @@ Rate the system response on:
 3. Completeness (1-5): How thoroughly does it answer the question?
 4. Clarity (1-5): How clear and well-structured is the response?
 
-Provide scores in JSON format:
-{{
-  "relevance": <score>,
-  "accuracy": <score>,
-  "completeness": <score>,
-  "clarity": <score>
-}}
-
-Only output the JSON, no other text."""
+Provide an integer score from 1 to 5 for each criterion."""
 
 
-class JudgeError(ValueError):
-    """Raised internally when a judge response cannot be turned into valid scores."""
+class JudgeScores(BaseModel):
+    """Structured judge output: four strict integer scores, each 1-5."""
+
+    relevance: StrictInt = Field(ge=MIN_SCORE, le=MAX_SCORE, description="Addresses the question")
+    accuracy: StrictInt = Field(ge=MIN_SCORE, le=MAX_SCORE, description="Factual correctness")
+    completeness: StrictInt = Field(ge=MIN_SCORE, le=MAX_SCORE, description="Thoroughness")
+    clarity: StrictInt = Field(ge=MIN_SCORE, le=MAX_SCORE, description="Clarity and structure")
 
 
 @dataclass
@@ -78,33 +75,19 @@ def build_judge_model(settings: Settings | None = None) -> Any:
     )
 
 
-def _extract_json(text: str) -> dict[str, Any]:
-    text = re.sub(r"```(?:json)?", "", text).strip()
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise JudgeError(f"malformed JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise JudgeError("judge response is not a JSON object")
-    return data
-
-
-def _validate_scores(data: dict[str, Any]) -> dict[str, int | None]:
-    scores: dict[str, int | None] = {}
-    for name in CRITERIA:
-        if name not in data:
-            raise JudgeError(f"missing criterion: {name}")
-        value = data[name]
-        if isinstance(value, bool) or not isinstance(value, int | float):
-            raise JudgeError(f"non-numeric score for {name}: {value!r}")
-        if value != int(value) or not MIN_SCORE <= value <= MAX_SCORE:
-            raise JudgeError(f"score for {name} out of range {MIN_SCORE}-{MAX_SCORE}: {value!r}")
-        scores[name] = int(value)
-    return scores
+def _describe_error(exc: Exception) -> str:
+    """Error text for a failure; names the failing criterion(s) for validation errors."""
+    if isinstance(exc, ValidationError):
+        parts = []
+        for err in exc.errors():
+            name = ".".join(str(x) for x in err["loc"]) or "response"
+            parts.append(f"{name}: {err['msg']} (input={err.get('input')!r})")
+        return "ValidationError: " + "; ".join(parts)
+    return f"{type(exc).__name__}: {exc}"
 
 
 class LLMJudge:
-    """Judge an answer with an injected chat model."""
+    """Judge an answer with an injected chat model via structured output."""
 
     def __init__(self, model: Any | None = None, settings: Settings | None = None) -> None:
         self.model = model if model is not None else build_judge_model(settings)
@@ -112,14 +95,14 @@ class LLMJudge:
     def evaluate(self, query: str, prediction: str, reference: str) -> JudgeResult:
         prompt = JUDGE_PROMPT.format(query=query, prediction=prediction, reference=reference)
         try:
-            response = self.model.invoke(prompt)
-            content = response if isinstance(response, str) else response.content
-            if not isinstance(content, str):
-                raise JudgeError("judge response content is not text")
-            scores = _validate_scores(_extract_json(content))
+            structured = self.model.with_structured_output(JudgeScores)
+            response = structured.invoke(prompt)
+            if not isinstance(response, JudgeScores):
+                raise TypeError(f"unexpected judge response: {type(response).__name__}")
+            scores = {name: getattr(response, name) for name in CRITERIA}
         except Exception as exc:  # noqa: BLE001 - any failure must become an honest None result
-            return JudgeResult(error=f"{type(exc).__name__}: {exc}")
-        overall = sum(scores.values()) / len(CRITERIA)  # type: ignore[arg-type]
+            return JudgeResult(error=_describe_error(exc))
+        overall = sum(scores.values()) / len(CRITERIA)
         return JudgeResult(scores=scores, overall=overall)
 
 
