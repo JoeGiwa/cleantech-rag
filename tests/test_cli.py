@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import logging
 import re
@@ -836,7 +837,7 @@ def _isolate_logging_and_hf_env(monkeypatch):
 
 @pytest.fixture
 def restore_logging():
-    names = [*cli.NOISY_LOGGERS]
+    names = [*cli.NOISY_LOGGERS, *cli.WARNING_NOISY_LOGGERS]
     saved = {n: logging.getLogger(n).level for n in names}
     yield
     for n, lvl in saved.items():
@@ -1054,3 +1055,92 @@ def test_root_verbose_before_evaluate_does_not_requiet(tmp_path, monkeypatch, re
     )
     assert res.exit_code == 0, res.output
     assert not calls
+
+
+def test_quiet_logging_survives_real_eval_libraries(restore_logging, capsys, caplog):
+    """Fakes never import the real stack; importing it must not undo the quiet setup.
+
+    Skips only when the eval extra itself is missing, never for an optional sub-check.
+    """
+    for mod in ("sentence_transformers", "rouge_score", "torch"):
+        if importlib.util.find_spec(mod) is None:
+            pytest.skip(f"{mod} (eval extra) not installed")
+    cli.configure_logging(False)  # first, as in the CLI: libraries import afterwards
+    capsys.readouterr()
+    import huggingface_hub.utils._http  # noqa: F401  (adds the hub's own stderr handler)
+    import sentence_transformers  # noqa: F401
+    import torch.distributed.elastic.multiprocessing.redirects  # noqa: F401
+    from rouge_score import rouge_scorer
+
+    http_loggers = ["httpx"]
+    if importlib.util.find_spec("httpx2") is not None:  # vendored by huggingface_hub >= 1.x
+        import httpx2  # noqa: F401
+
+        http_loggers.append("httpx2")
+
+    rouge_scorer.RougeScorer(["rouge1"]).score("a b", "a c")  # logs at INFO via absl
+    for name in http_loggers:
+        logging.getLogger(name).info("HTTP Request: GET x")
+    torch_name, hub_http = cli.WARNING_NOISY_LOGGERS
+    logging.getLogger(torch_name).warning("NOTE: Redirects are currently not supported")
+    logging.getLogger(hub_http).warning("You are sending unauthenticated requests to the HF Hub")
+    for name in (*http_loggers, "httpcore2", "absl", "huggingface_hub"):
+        assert logging.getLogger(name).getEffectiveLevel() >= logging.WARNING, name
+    for name in cli.WARNING_NOISY_LOGGERS:
+        assert logging.getLogger(name).getEffectiveLevel() >= logging.ERROR, name
+    text = capsys.readouterr().err + caplog.text
+    for noise in (
+        "HTTP Request",
+        "Using default tokenizer",
+        "Redirects are currently",
+        "unauthenticated requests",
+    ):
+        assert noise not in text
+    cli.configure_logging(True)
+    for name in (*http_loggers, "absl"):
+        assert logging.getLogger(name).getEffectiveLevel() <= logging.INFO, name
+    assert logging.getLogger(hub_http).getEffectiveLevel() <= logging.WARNING
+
+
+def test_new_noisy_loggers_registered():
+    for name in ("httpx2", "httpcore2", "absl"):
+        assert name in cli.NOISY_LOGGERS
+    assert cli.WARNING_NOISY_LOGGERS == (
+        "torch.distributed.elastic.multiprocessing.redirects",
+        "huggingface_hub.utils._http",
+    )
+
+
+@pytest.mark.parametrize("verbose, check", [(False, logging.ERROR), (True, logging.NOTSET)])
+def test_torch_logger_level_follows_verbose(restore_logging, verbose, check):
+    name = cli.WARNING_NOISY_LOGGERS[0]
+    cli.configure_logging(verbose)
+    assert logging.getLogger(name).level == check
+
+
+def test_torch_logger_requiet_then_verbose_roundtrip(restore_logging):
+    name = cli.WARNING_NOISY_LOGGERS[0]
+    cli.configure_logging(False)
+    cli.configure_logging(True)
+    assert logging.getLogger(name).level == logging.NOTSET
+    cli.configure_logging(False)
+    assert logging.getLogger(name).level == logging.ERROR
+
+
+def test_per_command_verbose_unquiets_torch_and_absl(tmp_path, monkeypatch, restore_logging):
+    _fake_agent(monkeypatch, _settings(tmp_path), [])
+    res = runner.invoke(cli.app, ["ask", "--verbose", "Q"])
+    assert res.exit_code == 0, res.output
+    assert logging.getLogger(cli.WARNING_NOISY_LOGGERS[0]).level == logging.NOTSET
+    assert logging.getLogger("absl").getEffectiveLevel() <= logging.INFO
+
+
+def test_quiet_torch_import_before_configure(restore_logging, capsys):
+    """Configuring after torch is already imported must still silence its warning."""
+    pytest.importorskip("torch")
+    import torch.distributed.elastic.multiprocessing.redirects  # noqa: F401
+
+    cli.configure_logging(False)
+    capsys.readouterr()
+    logging.getLogger(cli.WARNING_NOISY_LOGGERS[0]).warning("NOTE: Redirects are currently x")
+    assert "Redirects are currently" not in capsys.readouterr().err
