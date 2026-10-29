@@ -837,7 +837,7 @@ def _isolate_logging_and_hf_env(monkeypatch):
 
 @pytest.fixture
 def restore_logging():
-    names = [*cli.NOISY_LOGGERS]
+    names = [*cli.NOISY_LOGGERS, *cli.TORCH_NOISY_LOGGERS]
     saved = {n: logging.getLogger(n).level for n in names}
     yield
     for n, lvl in saved.items():
@@ -1087,3 +1087,44 @@ def test_quiet_logging_survives_real_eval_libraries(restore_logging, capsys, cap
         assert logging.getLogger("absl").getEffectiveLevel() <= logging.INFO
     finally:
         logging.getLogger(torch_name).setLevel(saved)
+
+
+def test_new_noisy_loggers_registered():
+    for name in ("httpx2", "httpcore2", "absl"):
+        assert name in cli.NOISY_LOGGERS
+    assert cli.TORCH_NOISY_LOGGERS == ("torch.distributed.elastic.multiprocessing.redirects",)
+
+
+@pytest.mark.parametrize("verbose, check", [(False, logging.ERROR), (True, logging.NOTSET)])
+def test_torch_logger_level_follows_verbose(restore_logging, verbose, check):
+    name = cli.TORCH_NOISY_LOGGERS[0]
+    cli.configure_logging(verbose)
+    assert logging.getLogger(name).level == check
+
+
+def test_torch_logger_requiet_then_verbose_roundtrip(restore_logging):
+    name = cli.TORCH_NOISY_LOGGERS[0]
+    cli.configure_logging(False)
+    cli.configure_logging(True)
+    assert logging.getLogger(name).level == logging.NOTSET
+    cli.configure_logging(False)
+    assert logging.getLogger(name).level == logging.ERROR
+
+
+def test_per_command_verbose_unquiets_torch_and_absl(tmp_path, monkeypatch, restore_logging):
+    _fake_agent(monkeypatch, _settings(tmp_path), [])
+    res = runner.invoke(cli.app, ["ask", "--verbose", "Q"])
+    assert res.exit_code == 0, res.output
+    assert logging.getLogger(cli.TORCH_NOISY_LOGGERS[0]).level == logging.NOTSET
+    assert logging.getLogger("absl").getEffectiveLevel() <= logging.INFO
+
+
+def test_quiet_torch_import_before_configure(restore_logging, capsys):
+    """Configuring after torch is already imported must still silence its warning."""
+    pytest.importorskip("torch")
+    import torch.distributed.elastic.multiprocessing.redirects  # noqa: F401
+
+    cli.configure_logging(False)
+    capsys.readouterr()
+    logging.getLogger(cli.TORCH_NOISY_LOGGERS[0]).warning("NOTE: Redirects are currently x")
+    assert "Redirects are currently" not in capsys.readouterr().err
