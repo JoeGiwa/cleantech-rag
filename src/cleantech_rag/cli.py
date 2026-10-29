@@ -38,12 +38,20 @@ app = typer.Typer(help="CleanTech agentic RAG.", no_args_is_help=True, add_compl
 NOISY_LOGGERS = (
     "httpx",
     "httpcore",
+    "httpx2",  # huggingface_hub >= 1.x vendors httpx as httpx2/httpcore2 (own logger names)
+    "httpcore2",
+    "absl",  # rouge_score logs "Using default tokenizer." at INFO through absl
     "openai",
     "urllib3",
     "huggingface_hub",
     "sentence_transformers",
     "transformers",
     "filelock",
+)
+# These log at WARNING, which the level above lets through: ERROR unless --verbose.
+WARNING_NOISY_LOGGERS = (
+    "torch.distributed.elastic.multiprocessing.redirects",  # "Redirects ... MacOs" on import
+    "huggingface_hub.utils._http",  # server X-HF-Warning: "unauthenticated requests ... HF_TOKEN"
 )
 
 
@@ -58,6 +66,8 @@ def configure_logging(verbose: bool = False) -> None:
     level = logging.INFO if verbose else logging.WARNING
     for name in NOISY_LOGGERS:
         logging.getLogger(name).setLevel(level)
+    for name in WARNING_NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.NOTSET if verbose else logging.ERROR)
     if not verbose:
         # Read when huggingface_hub is imported (lazily, on first use of the encoder).
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
