@@ -48,8 +48,11 @@ NOISY_LOGGERS = (
     "transformers",
     "filelock",
 )
-# Emits a WARNING on import of the eval stack on macOS; torch has its own non-propagating handler.
-TORCH_NOISY_LOGGERS = ("torch.distributed.elastic.multiprocessing.redirects",)
+# These log at WARNING, which the level above lets through: ERROR unless --verbose.
+WARNING_NOISY_LOGGERS = (
+    "torch.distributed.elastic.multiprocessing.redirects",  # "Redirects ... MacOs" on import
+    "huggingface_hub.utils._http",  # server X-HF-Warning: "unauthenticated requests ... HF_TOKEN"
+)
 
 
 _effective_verbose = False  # set by configure_logging; root or per-command --verbose
@@ -63,7 +66,7 @@ def configure_logging(verbose: bool = False) -> None:
     level = logging.INFO if verbose else logging.WARNING
     for name in NOISY_LOGGERS:
         logging.getLogger(name).setLevel(level)
-    for name in TORCH_NOISY_LOGGERS:
+    for name in WARNING_NOISY_LOGGERS:
         logging.getLogger(name).setLevel(logging.NOTSET if verbose else logging.ERROR)
     if not verbose:
         # Read when huggingface_hub is imported (lazily, on first use of the encoder).
