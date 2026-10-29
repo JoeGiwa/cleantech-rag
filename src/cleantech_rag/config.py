@@ -15,6 +15,7 @@ DEFAULT_RETRIEVAL_OVERFETCH = 4
 DEFAULT_MODEL_PRICES: dict[str, tuple[float, float]] = {
     "gpt-4o-mini": (0.15, 0.60),
     "gpt-4o": (2.50, 10.00),
+    "text-embedding-3-small": (0.02, 0.0),  # query embeddings (input only)
 }
 
 

@@ -121,8 +121,16 @@ def _usage_lines(usage: dict[str, Any]) -> list[str]:
             f"| {_fmt_n(t.get('total_tokens'))} | {cost_s} |"
         )
     total = _num(cost.get("total"))
-    if total is not None and any(_num(c) is not None for c in by_model.values()):
-        lines += ["", f"Estimated total: ${total:.4f} (priced models only)."]
+    unpriced = [m for m in sorted(tokens) if _num(by_model.get(m)) is None]
+    if total is None or len(unpriced) == len(tokens):
+        lines += ["", "Estimated total: n/a (no model has a price)."]
+    elif unpriced:
+        missing = ", ".join(
+            f"{m} ({_fmt_n(_section(tokens, m).get('total_tokens'))} tokens)" for m in unpriced
+        )
+        lines += ["", f"Estimated total: ${total:.4f} (partial; no price for {missing})."]
+    else:
+        lines += ["", f"Estimated total: ${total:.4f}."]
     return lines
 
 

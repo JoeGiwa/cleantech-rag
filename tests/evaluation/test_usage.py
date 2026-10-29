@@ -4,10 +4,12 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.embeddings import Embeddings
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
+from cleantech_rag.embedding_usage import CountingEmbeddings, embedding_usage_callback
 from cleantech_rag.evaluation import report
 from cleantech_rag.evaluation.judge import CRITERIA, JudgeResult
 from cleantech_rag.evaluation.runner import (
@@ -191,7 +193,121 @@ def test_settings_model_prices_default_and_env(monkeypatch):
     assert Settings(_env_file=None).model_prices == {"gpt-4o": (1.0, 2.0)}
 
 
-def test_report_no_total_line_when_nothing_priced():
+def test_report_no_dollar_total_when_nothing_priced():
     recs = evaluate_items(ITEMS[:1], LLMAgent(), None, encoder=enc)
     md = report.render_markdown(summarize(recs, {}, False, prices={}))
-    assert "n/a (no price)" in md and "Estimated total" not in md
+    assert "n/a (no price)" in md
+    assert "Estimated total: n/a (no model has a price)." in md and "$0.0000" not in md
+
+
+@pytest.mark.parametrize(
+    "prices",
+    [
+        {"gpt-4o": (2.5, 10.0), "gpt-4o-mini": (0.15, 0.6)},
+        {"gpt-4o-mini": (0.15, 0.6), "gpt-4o": (2.5, 10.0)},
+    ],
+)
+def test_dated_mini_never_matches_gpt_4o(prices):
+    """Both keys prefix the dated name; the longest one wins regardless of dict order."""
+    assert price_for("gpt-4o-mini-2024-07-18", prices) == (0.15, 0.6)
+
+
+def test_unpriced_models_listed_and_total_marked_partial():
+    recs = evaluate_items(ITEMS[:1], LLMAgent(), LLMJudgeFake(), encoder=enc)
+    summary = summarize(recs, {}, True, prices={"gpt-4o-mini": (1.0, 2.0)})
+    cost = summary["usage"]["cost_usd"]
+    assert cost["partial"] is True
+    assert cost["unpriced_models"] == {"gpt-4o-2024-08-06": 550}
+    md = report.render_markdown(summary)
+    assert "(partial; no price for gpt-4o-2024-08-06 (550 tokens))" in md
+
+
+def test_fully_priced_total_not_partial():
+    recs = evaluate_items(ITEMS[:1], LLMAgent(), LLMJudgeFake(), encoder=enc)
+    summary = summarize(recs, {}, True)  # defaults price both chat models
+    cost = summary["usage"]["cost_usd"]
+    assert cost["partial"] is False and cost["unpriced_models"] == {}
+    md = report.render_markdown(summary)
+    assert "partial" not in md and "Estimated total: $" in md
+
+
+# --- query-embedding tokens --------------------------------------------------------------
+
+
+class FakeEmbeddings(Embeddings):
+    def embed_documents(self, texts):
+        return [[1.0, 0.0] for _ in texts]
+
+    def embed_query(self, text):
+        return [1.0, 0.0]
+
+
+def words(text):  # offline stand-in for tiktoken: one token per word
+    return text.split()
+
+
+EMBEDDER = CountingEmbeddings(FakeEmbeddings(), "text-embedding-3-small", encode=words)
+
+
+class RetrievingAgent:
+    """Embeds the question (like the retriever does) and makes one chat call."""
+
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    def run(self, question, thread_id=None):
+        EMBEDDER.embed_query(question + " about solar")
+        AGENT_LLM.invoke(question)
+        if self.fail:
+            raise RuntimeError("boom")
+        return SimpleNamespace(answer="a", retrieved_ids=["a"], tool_calls=["retrieve_documents"])
+
+
+def test_query_embedding_tokens_counted_per_question_and_priced():
+    recs = evaluate_items(ITEMS, RetrievingAgent(), None, encoder=enc)
+    for rec in recs:  # "q0 about solar" = 3 tokens, no leak between questions
+        assert rec.agent_usage["text-embedding-3-small"] == {
+            "input_tokens": 3,
+            "output_tokens": 0,
+            "total_tokens": 3,
+        }
+    u = summarize(recs, {}, False)["usage"]
+    assert u["tokens"]["text-embedding-3-small"]["total_tokens"] == 6
+    assert u["cost_usd"]["by_model"]["text-embedding-3-small"] == pytest.approx(6 * 0.02 / 1e6)
+    assert u["prices_per_1m_tokens"]["text-embedding-3-small"] == [0.02, 0.0]
+    assert u["cost_usd"]["partial"] is False
+
+
+def test_query_embedding_tokens_kept_when_agent_errors():
+    rec = evaluate_items(ITEMS[:1], RetrievingAgent(fail=True), None, encoder=enc)[0]
+    assert rec.error and rec.agent_usage["text-embedding-3-small"]["total_tokens"] == 3
+
+
+def test_embeddings_not_tokenized_outside_collector():
+    def boom(text):
+        raise AssertionError("tokenized outside a collector")
+
+    emb = CountingEmbeddings(FakeEmbeddings(), "m", encode=boom)
+    assert emb.embed_query("x") == [1.0, 0.0]
+    with embedding_usage_callback() as usage:
+        CountingEmbeddings(FakeEmbeddings(), "m", encode=words).embed_documents(["a b", "c"])
+    assert usage == {"m": 3}
+
+
+def test_collector_sees_calls_from_context_copying_threads():
+    from langchain_core.runnables.config import get_executor_for_config
+
+    with embedding_usage_callback() as usage:
+        with get_executor_for_config(None) as ex:
+            list(ex.map(EMBEDDER.embed_query, ["one two", "three"]))
+    assert usage == {"text-embedding-3-small": 3}
+
+
+def test_load_index_wraps_embeddings_for_counting(tmp_path, fake_embeddings):
+    from cleantech_rag.config import Settings
+    from cleantech_rag.vectorstore import load_index
+
+    settings = Settings(_env_file=None, chroma_dir=tmp_path / "chroma")
+    store = load_index(settings, fake_embeddings)
+    assert isinstance(store.embeddings, CountingEmbeddings)
+    assert store.embeddings.model == settings.embedding_model

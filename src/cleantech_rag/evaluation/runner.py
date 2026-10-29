@@ -39,6 +39,7 @@ from typing import Any, Protocol
 from langchain_core.callbacks import get_usage_metadata_callback
 
 from cleantech_rag.config import DEFAULT_MODEL_PRICES
+from cleantech_rag.embedding_usage import embedding_usage_callback
 from cleantech_rag.evaluation import metrics
 from cleantech_rag.evaluation.judge import JudgeResult, aggregate_judge_results
 
@@ -158,6 +159,13 @@ def _normalize_usage(raw: Any) -> Usage:
     }
 
 
+def _embedding_usage(tokens: dict[str, int]) -> Usage:
+    """Embedding token counts (input only) in the same shape as chat usage."""
+    return {
+        m: {"input_tokens": n, "output_tokens": 0, "total_tokens": n} for m, n in tokens.items()
+    }
+
+
 def merge_usage(*usages: Usage) -> Usage:
     out: Usage = {}
     for usage in usages:
@@ -180,18 +188,21 @@ def price_for(model: str, prices: dict[str, Any]) -> tuple[float, float] | None:
 def summarize_usage(records: Sequence[QueryRecord], prices: dict[str, Any]) -> dict[str, Any]:
     """Total tokens per model (and per role) plus estimated USD cost from the price table.
 
-    Errored rows count too (their tokens were spent). Models with no price are listed with a
-    ``None`` cost and left out of the total.
+    Errored rows count too (their tokens were spent). Models with no price get a ``None`` cost,
+    are listed with their token counts under ``unpriced_models``, and are left out of the total,
+    which is then flagged ``partial``.
     """
     agent = merge_usage(*(r.agent_usage for r in records))
     judge = merge_usage(*(r.judge_usage for r in records))
     total = merge_usage(agent, judge)
     by_model: dict[str, float | None] = {}
     used_prices: dict[str, list[float]] = {}
+    unpriced: dict[str, int] = {}
     for model, u in total.items():
         price = price_for(model, prices)
         if price is None:
             by_model[model] = None
+            unpriced[model] = u["total_tokens"]
             continue
         by_model[model] = (u["input_tokens"] * price[0] + u["output_tokens"] * price[1]) / 1e6
         used_prices[model] = list(price)
@@ -201,6 +212,8 @@ def summarize_usage(records: Sequence[QueryRecord], prices: dict[str, Any]) -> d
         "cost_usd": {
             "by_model": by_model,
             "total": sum(c for c in by_model.values() if c is not None),
+            "partial": bool(unpriced),
+            "unpriced_models": unpriced,  # model -> total tokens
         },
         "prices_per_1m_tokens": used_prices,
     }
@@ -402,11 +415,13 @@ def evaluate_items(
             rec = QueryRecord(index=i, question=item.question, gold_ids=list(item.gold_ids))
             records.append(rec)
             try:
-                with get_usage_metadata_callback() as cb:
+                with get_usage_metadata_callback() as cb, embedding_usage_callback() as emb:
                     try:
                         result = agent.run(item.question)
                     finally:  # tokens of a failed run were still spent
-                        rec.agent_usage = _normalize_usage(cb.usage_metadata)
+                        rec.agent_usage = merge_usage(
+                            _normalize_usage(cb.usage_metadata), _embedding_usage(emb)
+                        )
                 rec.answer = result.answer or ""
                 rec.retrieved_ids = [str(x) for x in (getattr(result, "retrieved_ids", None) or [])]
                 rec.retrieval_used = _was_retrieval_used(result, rec.retrieved_ids)
