@@ -210,24 +210,27 @@ all 50 used retrieval, and the judge scored all 50. Source:
 [`results/summary_20261028T192319.json`](results/summary_20261028T192319.json) (table:
 [`.md`](results/summary_20261028T192319.md)).
 
-| Metric | Notebook baseline (suspect) | This version |
+| Metric | Notebook baseline (suspect) | This version: mean [95% CI] |
 |---|---|---|
-| Precision@5 (divide by k, headline) | 0.092 | 0.128 |
-| Precision@5 (retrieved denominator) | not measured | 0.128 |
-| Recall@5 | 0.310 | 0.422 |
-| MRR | 0.357 | 0.557 |
-| NDCG@5 | 0.290 | 0.427 |
-| ROUGE-1 | 0.278 | 0.278 |
-| ROUGE-2 | not reported | 0.073 |
-| ROUGE-L | not reported | 0.150 |
-| BLEU | 0.0 for every query (bug) | 0.024 |
-| Semantic similarity | 0.676 | 0.771 |
-| LLM-judge overall (1-5) | 4.12 | 4.96 |
+| Precision@5 (divide by k, headline) | 0.092 | 0.128 [0.104, 0.152] |
+| Precision@5 (retrieved denominator) | not measured | 0.128 [0.104, 0.152] |
+| Recall@5 | 0.310 | 0.422 [0.322, 0.520] |
+| MRR | 0.357 | 0.557 [0.437, 0.680] |
+| NDCG@5 | 0.290 | 0.427 [0.328, 0.527] |
+| ROUGE-1 | 0.278 | 0.278 [0.266, 0.291] |
+| ROUGE-2 | not reported | 0.073 [0.065, 0.081] |
+| ROUGE-L | not reported | 0.150 [0.143, 0.158] |
+| BLEU | 0.0 for every query (bug) | 0.024 [0.020, 0.029] |
+| Semantic similarity | 0.676 | 0.771 [0.752, 0.789] |
+| LLM-judge overall (1-5) | 4.12 | 4.96 [4.92, 4.98] |
 
 Measured cost: the full-corpus index (142,673 chunks), the 50-question eval with the gpt-4o judge,
 and all development runs together came to $0.76 in total (OpenAI usage dashboard, Oct 28-29 2026).
 
-Judge criteria for this run: relevance 5.00, accuracy 4.84, completeness 4.98, clarity 5.00.
+Intervals are 95% percentile bootstrap CIs over the 50 questions (1000 resamples, seed 0).
+
+Judge criteria for this run: relevance 5.00 [5.00, 5.00], accuracy 4.84 [4.74, 4.94],
+completeness 4.98 [4.94, 5.00], clarity 5.00 [5.00, 5.00].
 
 ![Retrieval metrics](results/summary_20261028T192319_retrieval.png)
 ![Response quality metrics](results/summary_20261028T192319_response.png)
@@ -246,12 +249,19 @@ Judge criteria for this run: relevance 5.00, accuracy 4.84, completeness 4.98, c
   the judge barely tells answers apart, so it is not useful for comparing versions.
 - **ROUGE and BLEU are weak signals here.** The answers are free-form, and n-gram overlap with one
   reference answer rewards matching wording rather than being correct.
-- **This is one run of n=50, with no confidence intervals.** Small differences, and possibly some of
-  the larger ones, may be noise.
+- **Baseline vs. this run's 95% CI (rough check only).** Six of the seven notebook baseline values
+  fall below this run's 95% CI: Precision@5 (0.092 < 0.104), Recall@5 (0.310 < 0.322), MRR
+  (0.357 < 0.437), NDCG@5 (0.290 < 0.328), semantic similarity (0.676 < 0.752) and judge overall
+  (4.12 < 4.92). ROUGE-1 (0.278) falls inside [0.266, 0.291], so it shows no detectable change. This
+  is not a formal significance test: the baseline is a single suspect point estimate with no
+  interval of its own, and the CIs only cover question-sampling noise in this one run, not
+  run-to-run variation in the agent.
+- **The CIs are wide because n=50.** For example, Recall@5 spans about ±0.10 and MRR about ±0.12,
+  and Precision@5 and Recall@5 clear the baseline by only about 0.01. Treat small differences as
+  noise.
 
 #### Next steps
 
-- Bootstrap confidence intervals over the 50 queries for every metric.
 - An ablation separating chunking from the agent and tool changes, to see which one drives the
   retrieval gains.
 - A stricter judge based on grounding: score each claim against the retrieved articles and the

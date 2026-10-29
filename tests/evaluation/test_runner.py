@@ -120,7 +120,15 @@ def test_summary_schema_and_files(tmp_path):
     jp, cp = write_outputs(recs, s, tmp_path / "res", datetime(2026, 1, 2, 3, 4, 5))
     assert jp.name == "summary_20260102T030405.json"
     data = json.loads(jp.read_text())
-    assert set(data) == {"config", "counts", "retrieval", "response", "judge", "usage"}
+    assert set(data) == {
+        "config",
+        "counts",
+        "retrieval",
+        "response",
+        "judge",
+        "confidence_intervals",
+        "usage",
+    }
     assert set(data["counts"]) == {
         "n_queries",
         "n_errors",
