@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import logging
 import re
@@ -1054,3 +1055,35 @@ def test_root_verbose_before_evaluate_does_not_requiet(tmp_path, monkeypatch, re
     )
     assert res.exit_code == 0, res.output
     assert not calls
+
+
+def test_quiet_logging_survives_real_eval_libraries(restore_logging, capsys, caplog):
+    """Fakes never import the real stack; importing it must not undo the quiet setup."""
+    for mod in ("sentence_transformers", "rouge_score", "torch"):
+        if importlib.util.find_spec(mod) is None:
+            pytest.skip(f"{mod} (eval extra) not installed")
+    torch_name = cli.TORCH_NOISY_LOGGERS[0]
+    saved = logging.getLogger(torch_name).level
+    try:
+        cli.configure_logging(False)  # first, as in the CLI: libraries import afterwards
+        capsys.readouterr()
+        pytest.importorskip("sentence_transformers")
+        rouge_scorer = pytest.importorskip("rouge_score.rouge_scorer")
+        import torch.distributed.elastic.multiprocessing.redirects  # noqa: F401
+
+        rouge_scorer.RougeScorer(["rouge1"]).score("a b", "a c")  # logs at INFO via absl
+        import httpx2  # noqa: F401  (vendored by huggingface_hub >= 1.x)
+
+        logging.getLogger("httpx2").info("HTTP Request: GET x")
+        logging.getLogger(torch_name).warning("NOTE: Redirects are currently not supported")
+        for name in ("httpx", "httpx2", "httpcore2", "absl", "huggingface_hub"):
+            assert logging.getLogger(name).getEffectiveLevel() >= logging.WARNING, name
+        assert logging.getLogger(torch_name).getEffectiveLevel() >= logging.ERROR
+        text = capsys.readouterr().err + caplog.text
+        for noise in ("HTTP Request", "Using default tokenizer", "Redirects are currently"):
+            assert noise not in text
+        cli.configure_logging(True)
+        assert logging.getLogger("httpx2").getEffectiveLevel() <= logging.INFO
+        assert logging.getLogger("absl").getEffectiveLevel() <= logging.INFO
+    finally:
+        logging.getLogger(torch_name).setLevel(saved)
