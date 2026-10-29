@@ -9,7 +9,7 @@ Set WaitTimeout 60s
 
 Type "uv run cleantech-rag chat"
 Enter
-Sleep 4s
+Wait /You>/
 
 Type "What are the main challenges for grid-scale battery storage?"
 Enter
