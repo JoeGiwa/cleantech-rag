@@ -98,7 +98,32 @@ def render_markdown(summary: dict[str, Any]) -> str:
             f"Scored {_fmt_n(judge.get('n_scored'))} of {_fmt_n(judge.get('n_total'))}; "
             f"failed {_fmt_n(judge.get('n_failed'))}, pending {_fmt_n(judge.get('n_pending'))}.",
         ]
+    lines += _usage_lines(_section(summary, "usage"))
     return "\n".join(lines) + "\n"
+
+
+def _usage_lines(usage: dict[str, Any]) -> list[str]:
+    """Token and estimated-cost table; empty for summaries from before usage was recorded."""
+    tokens = _section(usage, "tokens")
+    if not tokens:
+        return []
+    cost = _section(usage, "cost_usd")
+    by_model = _section(cost, "by_model")
+    lines = ["", "## Token usage and estimated cost", ""]
+    lines += ["| Model | Input tokens | Output tokens | Total tokens | Est. cost (USD) |"]
+    lines += ["|---|---|---|---|---|"]
+    for model in sorted(tokens):
+        t = _section(tokens, model)
+        c = _num(by_model.get(model))
+        cost_s = "n/a (no price)" if c is None else f"${c:.4f}"
+        lines.append(
+            f"| {model} | {_fmt_n(t.get('input_tokens'))} | {_fmt_n(t.get('output_tokens'))} "
+            f"| {_fmt_n(t.get('total_tokens'))} | {cost_s} |"
+        )
+    total = _num(cost.get("total"))
+    if total is not None:
+        lines += ["", f"Estimated total: ${total:.4f} (priced models only)."]
+    return lines
 
 
 def _pyplot():

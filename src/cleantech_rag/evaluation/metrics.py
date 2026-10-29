@@ -171,7 +171,7 @@ def default_encoder(model_name: str = DEFAULT_ENCODER_MODEL) -> Encoder:
     model = st.SentenceTransformer(model_name)
 
     def encode(texts: list[str]) -> Sequence[Sequence[float]]:
-        return [list(map(float, v)) for v in model.encode(texts)]
+        return [list(map(float, v)) for v in model.encode(texts, show_progress_bar=False)]
 
     return encode
 

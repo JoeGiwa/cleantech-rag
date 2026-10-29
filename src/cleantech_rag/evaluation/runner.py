@@ -36,6 +36,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from langchain_core.callbacks import get_usage_metadata_callback
+
+from cleantech_rag.config import DEFAULT_MODEL_PRICES
 from cleantech_rag.evaluation import metrics
 from cleantech_rag.evaluation.judge import JudgeResult, aggregate_judge_results
 
@@ -67,8 +70,13 @@ CSV_COLUMNS = (
     "judge_clarity",
     "judge_overall",
     "judge_error",
+    "agent_tokens",
+    "judge_tokens",
     "error",
 )
+USAGE_KEYS = ("input_tokens", "output_tokens", "total_tokens")
+# {model name: {"input_tokens", "output_tokens", "total_tokens"}}
+Usage = dict[str, dict[str, int]]
 
 
 @dataclass(frozen=True)
@@ -103,6 +111,9 @@ class QueryRecord:
     # Real judge failures so far (carried forward across resumes; a pending row interrupted by a
     # crash or Ctrl-C is not an attempt). Absent in older logs, which load as 0.
     judge_attempts: int = 0
+    # Token usage per model name, from responses' usage_metadata. Absent in older logs (empty).
+    agent_usage: Usage = field(default_factory=dict)
+    judge_usage: Usage = field(default_factory=dict)
     error: str | None = None
 
     def to_json(self) -> dict[str, Any]:
@@ -122,6 +133,8 @@ class QueryRecord:
             "n_retrieved": len(self.retrieved_ids),
             "retrieved_ids": ";".join(self.retrieved_ids),
             "gold_ids": ";".join(self.gold_ids),
+            "agent_tokens": _total_tokens(self.agent_usage),
+            "judge_tokens": _total_tokens(self.judge_usage),
             "error": self.error or "",
         }
         row.update(self.retrieval or {})
@@ -132,6 +145,65 @@ class QueryRecord:
             row["judge_overall"] = self.judge.overall
             row["judge_error"] = self.judge.error or ""
         return row
+
+
+def _total_tokens(usage: Usage) -> int:
+    return sum(u.get("total_tokens", 0) for u in usage.values())
+
+
+def _normalize_usage(raw: Any) -> Usage:
+    """Plain-int copy of a callback's ``usage_metadata`` (model name -> token counts)."""
+    return {
+        str(model): {k: int(u.get(k) or 0) for k in USAGE_KEYS} for model, u in (raw or {}).items()
+    }
+
+
+def merge_usage(*usages: Usage) -> Usage:
+    out: Usage = {}
+    for usage in usages:
+        for model, u in usage.items():
+            acc = out.setdefault(model, dict.fromkeys(USAGE_KEYS, 0))
+            for k in USAGE_KEYS:
+                acc[k] += int(u.get(k) or 0)
+    return out
+
+
+def price_for(model: str, prices: dict[str, Any]) -> tuple[float, float] | None:
+    """USD per 1M (input, output) tokens: the longest price key that prefixes ``model``."""
+    key = max((p for p in prices if model.startswith(p)), key=len, default=None)
+    if key is None:
+        return None
+    price_in, price_out = prices[key]
+    return float(price_in), float(price_out)
+
+
+def summarize_usage(records: Sequence[QueryRecord], prices: dict[str, Any]) -> dict[str, Any]:
+    """Total tokens per model (and per role) plus estimated USD cost from the price table.
+
+    Errored rows count too (their tokens were spent). Models with no price are listed with a
+    ``None`` cost and left out of the total.
+    """
+    agent = merge_usage(*(r.agent_usage for r in records))
+    judge = merge_usage(*(r.judge_usage for r in records))
+    total = merge_usage(agent, judge)
+    by_model: dict[str, float | None] = {}
+    used_prices: dict[str, list[float]] = {}
+    for model, u in total.items():
+        price = price_for(model, prices)
+        if price is None:
+            by_model[model] = None
+            continue
+        by_model[model] = (u["input_tokens"] * price[0] + u["output_tokens"] * price[1]) / 1e6
+        used_prices[model] = list(price)
+    return {
+        "tokens": total,
+        "tokens_by_role": {"agent": agent, "judge": judge},
+        "cost_usd": {
+            "by_model": by_model,
+            "total": sum(c for c in by_model.values() if c is not None),
+        },
+        "prices_per_1m_tokens": used_prices,
+    }
 
 
 def _mean(values: Sequence[float]) -> float | None:
@@ -330,7 +402,11 @@ def evaluate_items(
             rec = QueryRecord(index=i, question=item.question, gold_ids=list(item.gold_ids))
             records.append(rec)
             try:
-                result = agent.run(item.question)
+                with get_usage_metadata_callback() as cb:
+                    try:
+                        result = agent.run(item.question)
+                    finally:  # tokens of a failed run were still spent
+                        rec.agent_usage = _normalize_usage(cb.usage_metadata)
                 rec.answer = result.answer or ""
                 rec.retrieved_ids = [str(x) for x in (getattr(result, "retrieved_ids", None) or [])]
                 rec.retrieval_used = _was_retrieval_used(result, rec.retrieved_ids)
@@ -354,7 +430,13 @@ def evaluate_items(
             if log is not None:
                 rec.judge_pending = True
                 log.append(rec)  # keep the scores if the judge dies fatally
-            rec.judge = judge.evaluate(item.question, rec.answer, item.reference)
+            with get_usage_metadata_callback() as cb:
+                try:
+                    rec.judge = judge.evaluate(item.question, rec.answer, item.reference)
+                finally:  # keep tokens of retried/failed judge calls; a re-judge adds to them
+                    rec.judge_usage = merge_usage(
+                        rec.judge_usage, _normalize_usage(cb.usage_metadata)
+                    )
             rec.judge_pending = False
             rec.judge_attempts += not rec.judge.ok
         if log is not None:
@@ -363,7 +445,10 @@ def evaluate_items(
 
 
 def summarize(
-    records: Sequence[QueryRecord], config: dict[str, Any], judge_enabled: bool
+    records: Sequence[QueryRecord],
+    config: dict[str, Any],
+    judge_enabled: bool,
+    prices: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ok = [r for r in records if r.error is None]
     scored = [r for r in ok if r.retrieval is not None]
@@ -398,6 +483,7 @@ def summarize(
             if judge_enabled
             else None
         ),
+        "usage": summarize_usage(records, DEFAULT_MODEL_PRICES if prices is None else prices),
     }
     return summary
 

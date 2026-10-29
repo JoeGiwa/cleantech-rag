@@ -11,6 +11,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 DEFAULT_RETRIEVAL_OVERFETCH = 4
 
 
+# USD per 1M tokens as (input, output). Approximate list prices; override via MODEL_PRICES (JSON).
+DEFAULT_MODEL_PRICES: dict[str, tuple[float, float]] = {
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4o": (2.50, 10.00),
+}
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -32,6 +39,12 @@ class Settings(BaseSettings):
     max_history: int = Field(
         10, ge=1
     )  # previous turns kept per thread (the current turn is always included)
+
+    # Price table for eval cost estimates, matched to a response's model name by longest prefix
+    # (so "gpt-4o-mini-2024-07-18" uses "gpt-4o-mini"). Env: MODEL_PRICES='{"gpt-4o":[2.5,10]}'
+    model_prices: dict[str, tuple[float, float]] = Field(
+        default_factory=lambda: dict(DEFAULT_MODEL_PRICES)
+    )
 
     # Chunking / retrieval
     chunk_size: int = 1000

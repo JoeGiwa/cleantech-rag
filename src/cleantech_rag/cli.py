@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -56,6 +57,18 @@ def configure_logging(verbose: bool = False) -> None:
         # Read when huggingface_hub is imported (lazily, on first use of the encoder).
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
         os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+        quiet_loaded_hf()
+
+
+def quiet_loaded_hf() -> None:
+    """Silence HF progress bars/logs in libraries already imported (env vars come too late then)."""
+    hub = sys.modules.get("huggingface_hub.utils")
+    if hub is not None and hasattr(hub, "disable_progress_bars"):
+        hub.disable_progress_bars()
+    tf_logging = sys.modules.get("transformers.utils.logging")
+    if tf_logging is not None and hasattr(tf_logging, "set_verbosity_error"):
+        tf_logging.set_verbosity_error()
+        tf_logging.disable_progress_bar()
 
 
 VerboseOpt = Annotated[
@@ -343,6 +356,8 @@ def evaluate(
         items = items[:max_queries]
 
     agent = _setup_agent(settings)
+    if not verbose:
+        quiet_loaded_hf()  # HF may have been imported since configure_logging ran
     judge = None
     if not no_judge:
         from cleantech_rag.evaluation.judge import LLMJudge
@@ -401,7 +416,9 @@ def evaluate(
         "run_log": log_path.name,
         "timestamp": now.isoformat(timespec="seconds"),
     }
-    summary = summarize(records, config, judge_enabled=judge is not None)
+    summary = summarize(
+        records, config, judge_enabled=judge is not None, prices=settings.model_prices
+    )
     summary_path, csv_path = write_outputs(records, summary, output_dir, now)
     counts = summary["counts"]
     n_new = len(log.written)
