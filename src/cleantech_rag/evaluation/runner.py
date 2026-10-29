@@ -433,10 +433,14 @@ def evaluate_items(
             with get_usage_metadata_callback() as cb:
                 try:
                     rec.judge = judge.evaluate(item.question, rec.answer, item.reference)
-                finally:  # keep tokens of retried/failed judge calls; a re-judge adds to them
-                    rec.judge_usage = merge_usage(
-                        rec.judge_usage, _normalize_usage(cb.usage_metadata)
-                    )
+                except BaseException:  # fatal judge error / Ctrl-C: persist the tokens spent
+                    spent = _normalize_usage(cb.usage_metadata)
+                    rec.judge_usage = merge_usage(rec.judge_usage, spent)
+                    if log is not None and spent:
+                        log.append(rec)  # still judge_pending, so resume re-judges it
+                    raise
+                # keep tokens of retried/failed judge calls; a re-judge adds to them
+                rec.judge_usage = merge_usage(rec.judge_usage, _normalize_usage(cb.usage_metadata))
             rec.judge_pending = False
             rec.judge_attempts += not rec.judge.ok
         if log is not None:

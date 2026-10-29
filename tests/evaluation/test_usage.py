@@ -189,3 +189,9 @@ def test_settings_model_prices_default_and_env(monkeypatch):
     assert Settings(_env_file=None).model_prices["gpt-4o"] == (2.5, 10.0)
     monkeypatch.setenv("MODEL_PRICES", '{"gpt-4o": [1, 2]}')
     assert Settings(_env_file=None).model_prices == {"gpt-4o": (1.0, 2.0)}
+
+
+def test_report_no_total_line_when_nothing_priced():
+    recs = evaluate_items(ITEMS[:1], LLMAgent(), None, encoder=enc)
+    md = report.render_markdown(summarize(recs, {}, False, prices={}))
+    assert "n/a (no price)" in md and "Estimated total" not in md

@@ -1041,3 +1041,16 @@ def test_evaluate_quiets_loaded_hf_unless_verbose(tmp_path, monkeypatch, restore
     )
     assert res.exit_code == 0, res.output
     assert len(calls) == 1  # only the root callback (before the per-command --verbose)
+
+
+def test_root_verbose_before_evaluate_does_not_requiet(tmp_path, monkeypatch, restore_logging):
+    _eval_setup(tmp_path, monkeypatch, n=2)
+    calls = []
+    monkeypatch.setattr(cli, "quiet_loaded_hf", lambda: calls.append(1))
+    res = runner.invoke(
+        cli.app,
+        ["--verbose", "evaluate", "--output-dir", str(tmp_path / "out"), "--max-queries", "1"]
+        + ["--no-judge"],
+    )
+    assert res.exit_code == 0, res.output
+    assert not calls

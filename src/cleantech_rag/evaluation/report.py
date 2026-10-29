@@ -121,7 +121,7 @@ def _usage_lines(usage: dict[str, Any]) -> list[str]:
             f"| {_fmt_n(t.get('total_tokens'))} | {cost_s} |"
         )
     total = _num(cost.get("total"))
-    if total is not None:
+    if total is not None and any(_num(c) is not None for c in by_model.values()):
         lines += ["", f"Estimated total: ${total:.4f} (priced models only)."]
     return lines
 

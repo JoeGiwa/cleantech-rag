@@ -47,8 +47,13 @@ NOISY_LOGGERS = (
 )
 
 
+_effective_verbose = False  # set by configure_logging; root or per-command --verbose
+
+
 def configure_logging(verbose: bool = False) -> None:
     """INFO messages always; third-party HTTP/download chatter only with ``--verbose``."""
+    global _effective_verbose
+    _effective_verbose = verbose
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     level = logging.INFO if verbose else logging.WARNING
     for name in NOISY_LOGGERS:
@@ -356,7 +361,7 @@ def evaluate(
         items = items[:max_queries]
 
     agent = _setup_agent(settings)
-    if not verbose:
+    if not _effective_verbose:
         quiet_loaded_hf()  # HF may have been imported since configure_logging ran
     judge = None
     if not no_judge:

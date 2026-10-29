@@ -125,8 +125,8 @@ def test_failed_nonfatal_judge_tokens_still_recorded():
     assert recs[0].judge_usage["gpt-4o-2024-08-06"]["total_tokens"] == 550
 
 
-def test_fatal_judge_error_records_tokens_in_log_row(tmp_path):
-    """Known gap: documented as lost; assert the pending row at least survives the crash."""
+def test_fatal_judge_error_persists_agent_and_judge_tokens(tmp_path):
+    """A judge dying fatally still leaves the agent and judge tokens in the log row."""
     from cleantech_rag.evaluation.runner import RunLog
 
     class Fatal:
@@ -145,6 +145,7 @@ def test_fatal_judge_error_records_tokens_in_log_row(tmp_path):
         )
     rec = RunLog(path, {"x": 1}, resume=True).records()[0]
     assert rec.agent_usage["gpt-4o-mini-2024-07-18"]["total_tokens"] == 2400
+    assert rec.judge_usage["gpt-4o-2024-08-06"]["total_tokens"] == 550
 
 
 def test_report_ignores_empty_usage_tokens():
