@@ -1016,3 +1016,41 @@ def test_chat_passes_chat_flag_ask_does_not(tmp_path, monkeypatch):
     runner.invoke(cli.app, ["ask", "Q"])
     runner.invoke(cli.app, ["chat"], input="hi\nexit\n")
     assert seen == [(False, {}), (True, {"chat": True})]
+
+
+def test_evaluate_summary_has_usage(tmp_path, monkeypatch):
+    asked = _eval_setup(tmp_path, monkeypatch, n=2)
+    res = _eval_invoke(tmp_path, "--max-queries", "1", "--no-judge")
+    assert res.exit_code == 0, res.output
+    assert asked == ["Question 1?"]
+    data = json.loads(next((tmp_path / "out").glob("summary_*.json")).read_text())
+    assert data["usage"]["cost_usd"]["total"] == 0  # fake agent made no LLM calls
+
+
+def test_evaluate_quiets_loaded_hf_unless_verbose(tmp_path, monkeypatch, restore_logging):
+    _eval_setup(tmp_path, monkeypatch, n=2)
+    calls = []
+    monkeypatch.setattr(cli, "quiet_loaded_hf", lambda: calls.append(1))
+    assert _eval_invoke(tmp_path, "--max-queries", "1", "--no-judge").exit_code == 0
+    assert len(calls) == 2  # root callback, then again after the agent is set up
+    calls.clear()
+    res = runner.invoke(
+        cli.app,
+        ["evaluate", "--output-dir", str(tmp_path / "out2"), "--verbose", "--max-queries", "1"]
+        + ["--no-judge"],
+    )
+    assert res.exit_code == 0, res.output
+    assert len(calls) == 1  # only the root callback (before the per-command --verbose)
+
+
+def test_root_verbose_before_evaluate_does_not_requiet(tmp_path, monkeypatch, restore_logging):
+    _eval_setup(tmp_path, monkeypatch, n=2)
+    calls = []
+    monkeypatch.setattr(cli, "quiet_loaded_hf", lambda: calls.append(1))
+    res = runner.invoke(
+        cli.app,
+        ["--verbose", "evaluate", "--output-dir", str(tmp_path / "out"), "--max-queries", "1"]
+        + ["--no-judge"],
+    )
+    assert res.exit_code == 0, res.output
+    assert not calls

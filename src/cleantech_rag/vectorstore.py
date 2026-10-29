@@ -16,6 +16,7 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
 from cleantech_rag.config import Settings
+from cleantech_rag.embedding_usage import CountingEmbeddings
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +154,11 @@ def _open(client: chromadb.ClientAPI, settings: Settings, embedder: Embeddings) 
 
 
 def load_index(settings: Settings, embeddings: Embeddings | None = None) -> Chroma:
-    return _open(_client(settings), settings, embeddings or _default_embeddings(settings))
+    # Query embeddings are counted (only inside embedding_usage_callback) for eval cost estimates.
+    embedder = CountingEmbeddings(
+        embeddings or _default_embeddings(settings), settings.embedding_model
+    )
+    return _open(_client(settings), settings, embedder)
 
 
 def index_exists(settings: Settings) -> bool:
