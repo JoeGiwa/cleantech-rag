@@ -1,5 +1,7 @@
 # CleanTech Agentic RAG
 
+[![CI](https://github.com/JoeGiwa/cleantech-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/JoeGiwa/cleantech-rag/actions/workflows/ci.yml)
+
 An agentic RAG system that answers questions about clean technology over ~20k CleanTech news
 articles. A LangGraph agent decides per question whether to search the article index, search the
 web (Brave), or run a step-by-step reasoning chain over retrieved articles, and it remembers the
@@ -107,6 +109,11 @@ Then ask questions:
 uv run cleantech-rag ask "What are the main challenges for grid-scale battery storage?"
 uv run cleantech-rag chat          # interactive, remembers earlier turns; type 'exit' to quit
 ```
+
+<!-- Demo GIF placeholder: once demo/chat.gif exists, uncomment the next line.
+![Chat demo](demo/chat.gif)
+-->
+To re-record the demo (costs a few API calls): `vhs demo/chat.tape` (needs the vhs CLI installed and a built index).
 
 `ask` is single-shot with no memory; both commands print the answer followed by a numbered list of
 the retrieved source articles (or `Sources: no articles retrieved this turn.` when none were).
@@ -217,8 +224,8 @@ all 50 used retrieval, and the judge scored all 50. Source:
 | Semantic similarity | 0.676 | 0.771 |
 | LLM-judge overall (1-5) | 4.12 | 4.96 |
 
-Measured cost of this run (full index build, 50-query agent run, 50 judge calls): TBD. The run
-log does not record token usage, so this will be filled in from the OpenAI usage dashboard.
+Measured cost: the full-corpus index (142,673 chunks), the 50-question eval with the gpt-4o judge,
+and all development runs together came to $0.76 in total (OpenAI usage dashboard, Oct 28-29 2026).
 
 Judge criteria for this run: relevance 5.00, accuracy 4.84, completeness 4.98, clarity 5.00.
 
