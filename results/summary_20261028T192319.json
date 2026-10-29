@@ -1,0 +1,58 @@
+{
+  "config": {
+    "dataset": "complex",
+    "k": 5,
+    "agent_model": "gpt-4o-mini",
+    "embedding_model": "text-embedding-3-small",
+    "judge_enabled": true,
+    "judge_model": "gpt-4o",
+    "max_queries": null,
+    "n_queries_selected": 50,
+    "run_log": "run_20261028T192319.jsonl",
+    "timestamp": "2026-10-28T19:23:19"
+  },
+  "counts": {
+    "n_queries": 50,
+    "n_errors": 0,
+    "n_evaluated": 50,
+    "n_retrieval_used": 50,
+    "n_no_gold": 0
+  },
+  "retrieval": {
+    "all_queries": {
+      "n": 50,
+      "precision_at_k": 0.12800000000000006,
+      "precision_at_k_retrieved": 0.12800000000000006,
+      "recall_at_k": 0.4216666666666667,
+      "mrr": 0.5566666666666666,
+      "ndcg_at_k": 0.42666538843328355
+    },
+    "retrieval_only": {
+      "n": 50,
+      "precision_at_k": 0.12800000000000006,
+      "precision_at_k_retrieved": 0.12800000000000006,
+      "recall_at_k": 0.4216666666666667,
+      "mrr": 0.5566666666666666,
+      "ndcg_at_k": 0.42666538843328355
+    }
+  },
+  "response": {
+    "rouge1": 0.27811984591371847,
+    "rouge2": 0.07296700811167367,
+    "rougeL": 0.15021781141781004,
+    "bleu": 0.024260197759782328,
+    "semantic_similarity": 0.7710964197408038
+  },
+  "judge": {
+    "n_total": 50,
+    "n_scored": 50,
+    "n_failed": 0,
+    "relevance": 5.0,
+    "accuracy": 4.84,
+    "completeness": 4.98,
+    "clarity": 5.0,
+    "overall": 4.955,
+    "n_pending": 0,
+    "n_judge_failed_permanent": 0
+  }
+}

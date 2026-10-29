@@ -197,22 +197,58 @@ was a property of the dataset, not a parser bug (see below).
 
 ### This version (full corpus, 50 complex questions)
 
-Not run yet. These are placeholders, to be filled from a committed `summary_*.json` (via
-`cleantech-rag report`) once the full run has been done.
+One run on 2026-10-28: full corpus index, all 50 complex questions, `gpt-4o-mini` agent,
+`text-embedding-3-small` embeddings, `gpt-4o` judge, k=5. All 50 queries finished without errors,
+all 50 used retrieval, and the judge scored all 50. Source:
+[`results/summary_20261028T192319.json`](results/summary_20261028T192319.json) (table:
+[`.md`](results/summary_20261028T192319.md)).
 
-| Metric | Baseline (suspect) | This version |
+| Metric | Notebook baseline (suspect) | This version |
 |---|---|---|
-| Precision@5 (divide by k, headline) | 0.092 | TBD |
-| Precision@5 (retrieved denominator) | not measured | TBD |
-| Recall@5 | 0.310 | TBD |
-| MRR | 0.357 | TBD |
-| NDCG@5 | 0.290 | TBD |
-| ROUGE-1 | 0.278 | TBD |
-| BLEU | 0.0 for every query (bug) | TBD |
-| Semantic similarity | 0.676 | TBD |
-| LLM-judge overall | 4.12 | TBD |
+| Precision@5 (divide by k, headline) | 0.092 | 0.128 |
+| Precision@5 (retrieved denominator) | not measured | 0.128 |
+| Recall@5 | 0.310 | 0.422 |
+| MRR | 0.357 | 0.557 |
+| NDCG@5 | 0.290 | 0.427 |
+| ROUGE-1 | 0.278 | 0.278 |
+| ROUGE-2 | not reported | 0.073 |
+| ROUGE-L | not reported | 0.150 |
+| BLEU | 0.0 for every query (bug) | 0.024 |
+| Semantic similarity | 0.676 | 0.771 |
+| LLM-judge overall (1-5) | 4.12 | 4.96 |
 
-Charts: TBD (`results/*.png`).
+Measured cost of this run (full index build, 50-query agent run, 50 judge calls): TBD. The run
+log does not record token usage, so this will be filled in from the OpenAI usage dashboard.
+
+Judge criteria for this run: relevance 5.00, accuracy 4.84, completeness 4.98, clarity 5.00.
+
+![Retrieval metrics](results/summary_20261028T192319_retrieval.png)
+![Response quality metrics](results/summary_20261028T192319_response.png)
+![LLM judge scores](results/summary_20261028T192319_judge.png)
+
+#### Caveats
+
+- **The baseline is suspect.** Its retrieval numbers were affected by bug 2 (retrieved IDs leaking
+  from one query into the next), so the before/after retrieval change is not a clean comparison.
+- **The gains can't be credited to any one change.** Chunking, the ID-leak fix, removing duplicate
+  retrieval and the LangGraph agent all changed at once. Without an ablation, the effect of each
+  one is unknown.
+- **Precision@5 is capped at about 0.4.** Most questions have about 2 gold articles, so 0.128 should
+  be read against that ceiling, not against 1.0.
+- **The LLM judge is saturated.** An overall score of 4.96/5, with relevance and clarity at 5.00, means
+  the judge barely tells answers apart, so it is not useful for comparing versions.
+- **ROUGE and BLEU are weak signals here.** The answers are free-form, and n-gram overlap with one
+  reference answer rewards matching wording rather than being correct.
+- **This is one run of n=50, with no confidence intervals.** Small differences, and possibly some of
+  the larger ones, may be noise.
+
+#### Next steps
+
+- Bootstrap confidence intervals over the 50 queries for every metric.
+- An ablation separating chunking from the agent and tool changes, to see which one drives the
+  retrieval gains.
+- A stricter judge based on grounding: score each claim against the retrieved articles and the
+  reference answer, not on a 1-5 overall impression.
 
 ### Fixes relative to the notebook and expected impact
 
