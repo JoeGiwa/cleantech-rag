@@ -444,6 +444,17 @@ def report(
             "--output-dir", help="Where to write the charts and table (default: next to the JSON)."
         ),
     ] = None,
+    recompute: Annotated[
+        bool,
+        typer.Option(
+            "--recompute",
+            help="First (re)compute bootstrap CIs into the summary JSON from its run log.",
+        ),
+    ] = False,
+    run_log: Annotated[
+        Path | None,
+        typer.Option("--run-log", help="Run log for --recompute (default: config.run_log)."),
+    ] = None,
     verbose: VerboseOpt = False,
 ) -> None:
     """Make a markdown table and PNG charts from an evaluation summary JSON (offline, free)."""
@@ -451,12 +462,15 @@ def report(
     if not summary.is_file():
         raise _fail(f"Summary file not found at {summary}.")
     try:
-        from cleantech_rag.evaluation.report import generate_report
+        from cleantech_rag.evaluation.report import generate_report, recompute_confidence_intervals
 
+        if recompute:
+            recompute_confidence_intervals(summary, run_log)
+            typer.echo(f"Updated {summary} with bootstrap confidence intervals.")
         paths = generate_report(summary, output_dir or summary.parent)
     except ImportError as exc:
         raise _fail(f"{exc}. Install the extras: `uv sync --extra eval`.") from exc
-    except (ValueError, TypeError, AttributeError, OSError) as exc:
+    except (ValueError, TypeError, AttributeError, OSError) as exc:  # incl. FileNotFoundError
         raise _fail(f"cannot read summary {summary}: {exc}") from exc
     for path in paths:
         typer.echo(f"Wrote {path}")

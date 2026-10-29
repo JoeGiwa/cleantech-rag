@@ -62,6 +62,22 @@ def _fmt(value: Any, digits: int = 3) -> str:
     return "n/a" if number is None else f"{number:.{digits}f}"
 
 
+def _ci(cis: dict[str, Any], key: str) -> tuple[float, float] | None:
+    """(low, high) for a metric from a ``confidence_intervals`` section, if present and finite."""
+    entry = _section(cis, key)
+    low, high = _num(entry.get("ci_low")), _num(entry.get("ci_high"))
+    return None if low is None or high is None else (low, high)
+
+
+def _fmt_ci(value: Any, cis: dict[str, Any], key: str, digits: int = 3) -> str:
+    """``mean [low, high]`` when an interval exists, else just the mean."""
+    text = _fmt(value, digits)
+    ci = _ci(cis, key)
+    if ci is None or _num(value) is None:
+        return text
+    return f"{text} [{ci[0]:.{digits}f}, {ci[1]:.{digits}f}]"
+
+
 def render_markdown(summary: dict[str, Any]) -> str:
     """Markdown tables (config, counts, retrieval, response, judge) for a summary dict."""
     config, counts = _section(summary, "config"), _section(summary, "counts")
@@ -71,6 +87,18 @@ def render_markdown(summary: dict[str, Any]) -> str:
     lines += ["", "## Counts", ""]
     lines += [f"- {key}: {counts[key]}" for key in counts]
 
+    all_cis = _section(summary, "confidence_intervals")
+    ci_retrieval, ci_response = _section(all_cis, "retrieval"), _section(all_cis, "response")
+    ci_judge = _section(all_cis, "judge")
+    if all_cis:
+        level = _num(all_cis.get("confidence")) or 0.95
+        lines += [
+            "",
+            f"Cells show `mean [low, high]`: {level:.0%} {all_cis.get('method', 'bootstrap CI')} "
+            f"({_fmt_n(all_cis.get('n_resamples'))} resamples, "
+            f"seed {_fmt_n(all_cis.get('seed'))}).",
+        ]
+
     retrieval = _section(summary, "retrieval")
     lines += ["", f"## Retrieval (k={k})", ""]
     header = [
@@ -79,12 +107,18 @@ def render_markdown(summary: dict[str, Any]) -> str:
     ]
     lines += ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     for key, label in RETRIEVAL_LABELS.items():
-        cells = [_fmt(_section(retrieval, v).get(key)) for v, _ in VIEWS]
+        cells = [
+            _fmt_ci(_section(retrieval, v).get(key), _section(ci_retrieval, v), key)
+            for v, _ in VIEWS
+        ]
         lines.append(f"| {label} | " + " | ".join(cells) + " |")
 
     response = _section(summary, "response")
     lines += ["", "## Response quality", "", "| Metric | Mean |", "|---|---|"]
-    lines += [f"| {label} | {_fmt(response.get(key))} |" for key, label in RESPONSE_LABELS.items()]
+    lines += [
+        f"| {label} | {_fmt_ci(response.get(key), ci_response, key)} |"
+        for key, label in RESPONSE_LABELS.items()
+    ]
 
     judge = _section(summary, "judge") if summary.get("judge") is not None else None
     lines += ["", "## LLM judge (1-5)", ""]
@@ -92,7 +126,10 @@ def render_markdown(summary: dict[str, Any]) -> str:
         lines.append("Judge was not run.")
     else:
         lines += ["| Criterion | Mean |", "|---|---|"]
-        lines += [f"| {c.capitalize()} | {_fmt(judge.get(c), 2)} |" for c in JUDGE_CRITERIA]
+        lines += [
+            f"| {c.capitalize()} | {_fmt_ci(judge.get(c), ci_judge, c, 2)} |"
+            for c in JUDGE_CRITERIA
+        ]
         lines += [
             "",
             f"Scored {_fmt_n(judge.get('n_scored'))} of {_fmt_n(judge.get('n_total'))}; "
@@ -144,20 +181,32 @@ def _pyplot():
 
 
 def _bar_chart(
-    series: dict[str, dict[str, Any]], labels: dict[str, str], title: str, ylim: float, path: Path
+    series: dict[str, dict[str, Any]],
+    labels: dict[str, str],
+    title: str,
+    ylim: float,
+    path: Path,
+    cis: dict[str, dict[str, Any]] | None = None,
 ) -> Path:
-    """Grouped bars: one group per metric, one bar per series; None values are skipped."""
+    """Grouped bars: one group per metric, one bar per series; None values are skipped.
+
+    ``cis`` (series name -> metric -> CI entry) adds error bars where an interval exists.
+    """
     plt = _pyplot()
     fig, ax = plt.subplots(figsize=(8, 4.5))
     width = 0.8 / max(len(series), 1)
     for s, (name, values) in enumerate(series.items()):
-        xs, ys = [], []
+        xs, ys, lows, highs = [], [], [], []
         for i, key in enumerate(labels):
             number = _num(values.get(key))
             if number is not None:
                 xs.append(i + s * width)
                 ys.append(number)
-        bars = ax.bar(xs, ys, width, label=name)
+                ci = _ci((cis or {}).get(name, {}), key)
+                lows.append(max(number - ci[0], 0.0) if ci else 0.0)
+                highs.append(max(ci[1] - number, 0.0) if ci else 0.0)
+        has_err = any(lows) or any(highs)
+        bars = ax.bar(xs, ys, width, label=name, yerr=[lows, highs] if has_err else None, capsize=3)
         ax.bar_label(bars, fmt="%.2f", fontsize=8)
     ax.set_xticks([i + width * (len(series) - 1) / 2 for i in range(len(labels))])
     ax.set_xticklabels(list(labels.values()), rotation=20, ha="right")
@@ -169,6 +218,37 @@ def _bar_chart(
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return path
+
+
+def recompute_confidence_intervals(summary_path: Path, run_log: Path | None = None) -> Path:
+    """Add bootstrap CIs to an existing summary JSON from its run log (no API calls).
+
+    Only the ``confidence_intervals`` key is written; every other value is left untouched. The
+    log defaults to ``config.run_log`` next to the summary. Refuses a log whose question counts
+    do not match the summary.
+    """
+    from cleantech_rag.evaluation.runner import confidence_intervals, load_records
+
+    summary_path = Path(summary_path)
+    summary = load_summary(summary_path)
+    config = _section(summary, "config")
+    if run_log is None:
+        name = config.get("run_log")
+        if not isinstance(name, str) or not name:
+            raise ValueError("summary has no config.run_log; pass --run-log.")
+        run_log = summary_path.parent / name
+    run_log = Path(run_log)
+    if not run_log.is_file():
+        raise FileNotFoundError(f"run log {run_log} not found (it is gitignored; pass --run-log).")
+    _, records = load_records(run_log)
+    n_queries = _section(summary, "counts").get("n_queries")
+    if n_queries is not None and n_queries != len(records):
+        raise ValueError(f"run log has {len(records)} questions but the summary says {n_queries}.")
+    summary["confidence_intervals"] = confidence_intervals(
+        records, bool(config.get("judge_enabled", summary.get("judge") is not None))
+    )
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    return summary_path
 
 
 def generate_report(summary_path: Path, out_dir: Path) -> list[Path]:
@@ -185,7 +265,13 @@ def generate_report(summary_path: Path, out_dir: Path) -> list[Path]:
     written = [md_path]
 
     retrieval = _section(summary, "retrieval")
+    all_cis = _section(summary, "confidence_intervals")
     series = {label: _section(retrieval, view) for view, label in VIEWS if view in retrieval}
+    retrieval_cis = {
+        label: _section(_section(all_cis, "retrieval"), view)
+        for view, label in VIEWS
+        if view in retrieval
+    }
     written.append(
         _bar_chart(
             series,
@@ -193,6 +279,7 @@ def generate_report(summary_path: Path, out_dir: Path) -> list[Path]:
             f"Retrieval metrics (k={k})",
             1.0,
             out_dir / f"{stem}_retrieval.png",
+            retrieval_cis,
         )
     )
     written.append(
@@ -202,6 +289,7 @@ def generate_report(summary_path: Path, out_dir: Path) -> list[Path]:
             "Response quality",
             1.0,
             out_dir / f"{stem}_response.png",
+            {"Mean": _section(all_cis, "response")},
         )
     )
     if summary.get("judge") is not None:
@@ -213,6 +301,7 @@ def generate_report(summary_path: Path, out_dir: Path) -> list[Path]:
                 "LLM judge (1-5)",
                 5.0,
                 out_dir / f"{stem}_judge.png",
+                {"Mean": _section(all_cis, "judge")},
             )
         )
     return written

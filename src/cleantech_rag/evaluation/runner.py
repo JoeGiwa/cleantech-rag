@@ -41,7 +41,8 @@ from langchain_core.callbacks import get_usage_metadata_callback
 from cleantech_rag.config import DEFAULT_MODEL_PRICES
 from cleantech_rag.embedding_usage import embedding_usage_callback
 from cleantech_rag.evaluation import metrics
-from cleantech_rag.evaluation.judge import JudgeResult, aggregate_judge_results
+from cleantech_rag.evaluation.bootstrap import CONFIDENCE, N_RESAMPLES, SEED, bootstrap_ci
+from cleantech_rag.evaluation.judge import CRITERIA, JudgeResult, aggregate_judge_results
 
 logger = logging.getLogger(__name__)
 
@@ -264,8 +265,11 @@ def read_header(path: Path) -> dict[str, Any]:
 class RunLog:
     """Append-only JSONL log of per-query records with a config header on the first line."""
 
-    def __init__(self, path: Path, header: dict[str, Any], resume: bool = False) -> None:
+    def __init__(
+        self, path: Path, header: dict[str, Any], resume: bool = False, read_only: bool = False
+    ) -> None:
         self.path = path
+        self._read_only = read_only
         self.header = header
         self._latest: dict[int, QueryRecord] = {}
         self.written: set[int] = set()  # question indices appended during this session
@@ -321,8 +325,9 @@ class RunLog:
                         self.path,
                         lineno,
                     )
-                    with self.path.open("r+b") as fh:
-                        fh.truncate(start)
+                    if not self._read_only:
+                        with self.path.open("r+b") as fh:
+                            fh.truncate(start)
                     break
                 raise self._corrupt(lineno, exc) from exc
             try:
@@ -330,6 +335,8 @@ class RunLog:
             except (TypeError, KeyError, ValueError, AttributeError) as exc:
                 raise self._corrupt(lineno, f"{type(exc).__name__}: {exc}") from exc
             self._latest[rec.index] = rec  # last row per question wins
+        if self._read_only:
+            return
         # A complete last line may still lack its newline; never glue the next row onto it.
         with self.path.open("rb+") as fh:
             fh.seek(0, os.SEEK_END)
@@ -365,6 +372,48 @@ class RunLog:
 
     def records(self) -> list[QueryRecord]:
         return [self._latest[i] for i in sorted(self._latest)]
+
+
+def load_records(path: Path) -> tuple[dict[str, Any], list[QueryRecord]]:
+    """(header config, latest record per question) of a run log, without modifying the file."""
+    header = read_header(path)
+    return header, RunLog(path, header, resume=True, read_only=True).records()
+
+
+def confidence_intervals(records: Sequence[QueryRecord], judge_enabled: bool) -> dict[str, Any]:
+    """Bootstrap CIs (mean, ci_low, ci_high, n) for every metric, from per-question rows.
+
+    Uses exactly the rows ``summarize`` averages, so each ``mean`` equals the summary's mean.
+    """
+    ok = [r for r in records if r.error is None]
+    scored = [r for r in ok if r.retrieval is not None]
+    views = {"all_queries": scored, "retrieval_only": [r for r in scored if r.retrieval_used]}
+    out: dict[str, Any] = {
+        "method": "percentile bootstrap over questions",
+        "confidence": CONFIDENCE,
+        "n_resamples": N_RESAMPLES,
+        "seed": SEED,
+        "retrieval": {
+            view: {
+                name: bootstrap_ci([r.retrieval[name] for r in rows if r.retrieval])
+                for name in RETRIEVAL_METRICS
+            }
+            for view, rows in views.items()
+        },
+        "response": {
+            name: bootstrap_ci([r.response[name] for r in ok]) for name in RESPONSE_METRICS
+        },
+        "judge": None,
+    }
+    if judge_enabled:
+        judged = [r.judge for r in ok if r.judge is not None and r.judge.ok]
+        judge_ci = {
+            name: bootstrap_ci([j.scores[name] for j in judged if j.scores.get(name) is not None])
+            for name in CRITERIA
+        }
+        judge_ci["overall"] = bootstrap_ci([j.overall for j in judged if j.overall is not None])
+        out["judge"] = judge_ci
+    return out
 
 
 def _score(rec: QueryRecord, item: EvalItem, k: int, encoder: metrics.Encoder | None) -> None:
@@ -502,6 +551,7 @@ def summarize(
             if judge_enabled
             else None
         ),
+        "confidence_intervals": confidence_intervals(records, judge_enabled),
         "usage": summarize_usage(records, DEFAULT_MODEL_PRICES if prices is None else prices),
     }
     return summary
