@@ -110,9 +110,7 @@ uv run cleantech-rag ask "What are the main challenges for grid-scale battery st
 uv run cleantech-rag chat          # interactive, remembers earlier turns; type 'exit' to quit
 ```
 
-<!-- Demo GIF placeholder: once demo/chat.gif exists, uncomment the next line.
 ![Chat demo](demo/chat.gif)
--->
 To re-record the demo (costs a few API calls): `vhs demo/chat.tape` (needs the vhs CLI installed and a built index).
 
 `ask` is single-shot with no memory; both commands print the answer followed by a numbered list of
